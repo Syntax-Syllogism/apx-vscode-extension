@@ -1,0 +1,1104 @@
+{
+  "commands": {
+    "apx:generate": {
+      "aliases": [],
+      "args": {},
+      "description": "Builds selector/domain/unit-of-work plans from one SObject describe and writes all selected outputs in a single manifest.",
+      "examples": [
+        "Generate selector, domain, and unit-of-work in AT4DX style:\n<%= config.bin %> <%= command.id %> --target-org myOrg --sobject Account --selector --domain --unit-of-work --at4dx"
+      ],
+      "flags": {
+        "json": {
+          "description": "Format output as json.",
+          "helpGroup": "GLOBAL",
+          "name": "json",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "flags-dir": {
+          "helpGroup": "GLOBAL",
+          "name": "flags-dir",
+          "summary": "Import flag values from a directory.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "target-org": {
+          "char": "o",
+          "name": "target-org",
+          "noCacheDefault": true,
+          "required": true,
+          "summary": "Target org username or alias.",
+          "hasDynamicHelp": true,
+          "multiple": false,
+          "type": "option"
+        },
+        "sobject": {
+          "char": "s",
+          "name": "sobject",
+          "required": true,
+          "summary": "SObject API name used for generated artifacts.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "at4dx": {
+          "name": "at4dx",
+          "summary": "Generate AT4DX-flavor artifacts.",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "fflib": {
+          "name": "fflib",
+          "summary": "Generate fflib-flavor artifacts.",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "api-version": {
+          "char": "a",
+          "description": "Override the api version used for api requests made by this command",
+          "name": "api-version",
+          "summary": "Override the API version used for the org connection.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "binding-sequence": {
+          "char": "b",
+          "name": "binding-sequence",
+          "summary": "Binding sequence value for AT4DX unit-of-work metadata.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "output-path": {
+          "char": "p",
+          "name": "output-path",
+          "summary": "Output folder relative to the Salesforce project root.",
+          "default": "generated-files",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "prefix": {
+          "name": "prefix",
+          "summary": "Optional namespace-style class prefix.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "selector": {
+          "char": "r",
+          "name": "selector",
+          "summary": "Include selector artifacts in aggregate generation.",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "domain": {
+          "char": "d",
+          "name": "domain",
+          "summary": "Include domain artifacts in aggregate generation.",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "unit-of-work": {
+          "char": "u",
+          "name": "unit-of-work",
+          "summary": "Include unit-of-work artifacts in aggregate generation.",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "dry-run": {
+          "name": "dry-run",
+          "summary": "Render and validate generation output without writing files.",
+          "allowNo": false,
+          "type": "boolean"
+        }
+      },
+      "hasDynamicHelp": true,
+      "hiddenAliases": [],
+      "id": "apx:generate",
+      "pluginAlias": "@syntax-syllogism/apx",
+      "pluginName": "@syntax-syllogism/apx",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Generate multiple AEP artifact groups in one command run.",
+      "enableJsonFlag": true,
+      "isESM": true,
+      "relativePath": [
+        "lib",
+        "commands",
+        "apx",
+        "generate.js"
+      ],
+      "aliasPermutations": [],
+      "permutations": [
+        "apx:generate",
+        "generate:apx"
+      ]
+    },
+    "apx:generate:action": {
+      "aliases": [],
+      "args": {},
+      "description": "Creates offline action scaffolding and a DomainProcessBinding record without requiring an org connection.",
+      "examples": [
+        "Generate action artifacts with defaults:\n<%= config.bin %> <%= command.id %> -s Account -c DefaultAccountSloganBasedOnNameAction"
+      ],
+      "flags": {
+        "json": {
+          "description": "Format output as json.",
+          "helpGroup": "GLOBAL",
+          "name": "json",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "flags-dir": {
+          "helpGroup": "GLOBAL",
+          "name": "flags-dir",
+          "summary": "Import flag values from a directory.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "sobject": {
+          "char": "s",
+          "name": "sobject",
+          "required": true,
+          "summary": "SObject API name used for generated artifacts.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "class-name": {
+          "char": "c",
+          "name": "class-name",
+          "required": true,
+          "summary": "Selector method-injection class name.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "trigger-operation": {
+          "name": "trigger-operation",
+          "summary": "Trigger operation enum value for AT4DX domain-process bindings.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "options": [
+            "Before_Insert",
+            "Before_Update",
+            "Before_Delete",
+            "After_Insert",
+            "After_Update",
+            "After_Delete",
+            "After_Undelete"
+          ],
+          "type": "option"
+        },
+        "order": {
+          "name": "order",
+          "summary": "Order-of-execution token used for AT4DX domain-process bindings (for example, 10.1).",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "process-name": {
+          "name": "process-name",
+          "summary": "Optional process token used to build AT4DX binding developer names.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "description": {
+          "name": "description",
+          "summary": "Optional description value written into generated metadata.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "api-version": {
+          "char": "a",
+          "description": "Override the api version used for api requests made by this command",
+          "name": "api-version",
+          "summary": "Override the API version used for the org connection.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "output-path": {
+          "char": "p",
+          "name": "output-path",
+          "summary": "Output folder relative to the Salesforce project root.",
+          "default": "generated-files",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "dry-run": {
+          "name": "dry-run",
+          "summary": "Render and validate generation output without writing files.",
+          "allowNo": false,
+          "type": "boolean"
+        }
+      },
+      "hasDynamicHelp": false,
+      "hiddenAliases": [],
+      "id": "apx:generate:action",
+      "pluginAlias": "@syntax-syllogism/apx",
+      "pluginName": "@syntax-syllogism/apx",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Generate an AT4DX domain-process action class, test, and binding metadata.",
+      "enableJsonFlag": true,
+      "isESM": true,
+      "relativePath": [
+        "lib",
+        "commands",
+        "apx",
+        "generate",
+        "action.js"
+      ],
+      "aliasPermutations": [],
+      "permutations": [
+        "apx:generate:action",
+        "generate:apx:action",
+        "generate:action:apx",
+        "apx:action:generate",
+        "action:apx:generate",
+        "action:generate:apx"
+      ]
+    },
+    "apx:generate:criteria": {
+      "aliases": [],
+      "args": {},
+      "description": "Creates offline criteria scaffolding and a DomainProcessBinding record without requiring an org connection.",
+      "examples": [
+        "Generate criteria artifacts with defaults:\n<%= config.bin %> <%= command.id %> -s Account -c AccountNameContainsFishCriteria"
+      ],
+      "flags": {
+        "json": {
+          "description": "Format output as json.",
+          "helpGroup": "GLOBAL",
+          "name": "json",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "flags-dir": {
+          "helpGroup": "GLOBAL",
+          "name": "flags-dir",
+          "summary": "Import flag values from a directory.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "sobject": {
+          "char": "s",
+          "name": "sobject",
+          "required": true,
+          "summary": "SObject API name used for generated artifacts.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "class-name": {
+          "char": "c",
+          "name": "class-name",
+          "required": true,
+          "summary": "Selector method-injection class name.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "trigger-operation": {
+          "name": "trigger-operation",
+          "summary": "Trigger operation enum value for AT4DX domain-process bindings.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "options": [
+            "Before_Insert",
+            "Before_Update",
+            "Before_Delete",
+            "After_Insert",
+            "After_Update",
+            "After_Delete",
+            "After_Undelete"
+          ],
+          "type": "option"
+        },
+        "order": {
+          "name": "order",
+          "summary": "Order-of-execution token used for AT4DX domain-process bindings (for example, 10.1).",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "process-name": {
+          "name": "process-name",
+          "summary": "Optional process token used to build AT4DX binding developer names.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "description": {
+          "name": "description",
+          "summary": "Optional description value written into generated metadata.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "api-version": {
+          "char": "a",
+          "description": "Override the api version used for api requests made by this command",
+          "name": "api-version",
+          "summary": "Override the API version used for the org connection.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "output-path": {
+          "char": "p",
+          "name": "output-path",
+          "summary": "Output folder relative to the Salesforce project root.",
+          "default": "generated-files",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "dry-run": {
+          "name": "dry-run",
+          "summary": "Render and validate generation output without writing files.",
+          "allowNo": false,
+          "type": "boolean"
+        }
+      },
+      "hasDynamicHelp": false,
+      "hiddenAliases": [],
+      "id": "apx:generate:criteria",
+      "pluginAlias": "@syntax-syllogism/apx",
+      "pluginName": "@syntax-syllogism/apx",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Generate an AT4DX domain-process criteria class, test, and binding metadata.",
+      "enableJsonFlag": true,
+      "isESM": true,
+      "relativePath": [
+        "lib",
+        "commands",
+        "apx",
+        "generate",
+        "criteria.js"
+      ],
+      "aliasPermutations": [],
+      "permutations": [
+        "apx:generate:criteria",
+        "generate:apx:criteria",
+        "generate:criteria:apx",
+        "apx:criteria:generate",
+        "criteria:apx:generate",
+        "criteria:generate:apx"
+      ]
+    },
+    "apx:generate:domain": {
+      "aliases": [],
+      "args": {},
+      "description": "Describes the target SObject and scaffolds domain artifacts in either AT4DX or fflib flavor.",
+      "examples": [
+        "Generate AT4DX domain files:\n<%= config.bin %> <%= command.id %> --target-org myOrg --sobject Account --at4dx"
+      ],
+      "flags": {
+        "json": {
+          "description": "Format output as json.",
+          "helpGroup": "GLOBAL",
+          "name": "json",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "flags-dir": {
+          "helpGroup": "GLOBAL",
+          "name": "flags-dir",
+          "summary": "Import flag values from a directory.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "target-org": {
+          "char": "o",
+          "name": "target-org",
+          "noCacheDefault": true,
+          "required": true,
+          "summary": "Target org username or alias.",
+          "hasDynamicHelp": true,
+          "multiple": false,
+          "type": "option"
+        },
+        "sobject": {
+          "char": "s",
+          "name": "sobject",
+          "required": true,
+          "summary": "SObject API name used for generated artifacts.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "at4dx": {
+          "name": "at4dx",
+          "summary": "Generate AT4DX-flavor artifacts.",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "fflib": {
+          "name": "fflib",
+          "summary": "Generate fflib-flavor artifacts.",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "api-version": {
+          "char": "a",
+          "description": "Override the api version used for api requests made by this command",
+          "name": "api-version",
+          "summary": "Override the API version used for the org connection.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "output-path": {
+          "char": "p",
+          "name": "output-path",
+          "summary": "Output folder relative to the Salesforce project root.",
+          "default": "generated-files",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "prefix": {
+          "name": "prefix",
+          "summary": "Optional namespace-style class prefix.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "dry-run": {
+          "name": "dry-run",
+          "summary": "Render and validate generation output without writing files.",
+          "allowNo": false,
+          "type": "boolean"
+        }
+      },
+      "hasDynamicHelp": true,
+      "hiddenAliases": [],
+      "id": "apx:generate:domain",
+      "pluginAlias": "@syntax-syllogism/apx",
+      "pluginName": "@syntax-syllogism/apx",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Generate domain classes, tests, triggers, and metadata for an SObject.",
+      "enableJsonFlag": true,
+      "isESM": true,
+      "relativePath": [
+        "lib",
+        "commands",
+        "apx",
+        "generate",
+        "domain.js"
+      ],
+      "aliasPermutations": [],
+      "permutations": [
+        "apx:generate:domain",
+        "generate:apx:domain",
+        "generate:domain:apx",
+        "apx:domain:generate",
+        "domain:apx:generate",
+        "domain:generate:apx"
+      ]
+    },
+    "apx:generate:selector": {
+      "aliases": [],
+      "args": {},
+      "description": "Describes the target SObject and scaffolds selector artifacts in either AT4DX or fflib flavor.",
+      "examples": [
+        "Generate AT4DX selector files:\n<%= config.bin %> <%= command.id %> --target-org myOrg --sobject Account --at4dx",
+        "Generate fflib selector files with a prefix:\n<%= config.bin %> <%= command.id %> --target-org myOrg --sobject Property__c --fflib --prefix foobar"
+      ],
+      "flags": {
+        "json": {
+          "description": "Format output as json.",
+          "helpGroup": "GLOBAL",
+          "name": "json",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "flags-dir": {
+          "helpGroup": "GLOBAL",
+          "name": "flags-dir",
+          "summary": "Import flag values from a directory.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "target-org": {
+          "char": "o",
+          "name": "target-org",
+          "noCacheDefault": true,
+          "required": true,
+          "summary": "Target org username or alias.",
+          "hasDynamicHelp": true,
+          "multiple": false,
+          "type": "option"
+        },
+        "sobject": {
+          "char": "s",
+          "name": "sobject",
+          "required": true,
+          "summary": "SObject API name used for generated artifacts.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "at4dx": {
+          "name": "at4dx",
+          "summary": "Generate AT4DX-flavor artifacts.",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "fflib": {
+          "name": "fflib",
+          "summary": "Generate fflib-flavor artifacts.",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "api-version": {
+          "char": "a",
+          "description": "Override the api version used for api requests made by this command",
+          "name": "api-version",
+          "summary": "Override the API version used for the org connection.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "output-path": {
+          "char": "p",
+          "name": "output-path",
+          "summary": "Output folder relative to the Salesforce project root.",
+          "default": "generated-files",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "prefix": {
+          "name": "prefix",
+          "summary": "Optional namespace-style class prefix.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "dry-run": {
+          "name": "dry-run",
+          "summary": "Render and validate generation output without writing files.",
+          "allowNo": false,
+          "type": "boolean"
+        }
+      },
+      "hasDynamicHelp": true,
+      "hiddenAliases": [],
+      "id": "apx:generate:selector",
+      "pluginAlias": "@syntax-syllogism/apx",
+      "pluginName": "@syntax-syllogism/apx",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Generate selector classes, tests, and metadata for an SObject.",
+      "enableJsonFlag": true,
+      "isESM": true,
+      "relativePath": [
+        "lib",
+        "commands",
+        "apx",
+        "generate",
+        "selector.js"
+      ],
+      "aliasPermutations": [],
+      "permutations": [
+        "apx:generate:selector",
+        "generate:apx:selector",
+        "generate:selector:apx",
+        "apx:selector:generate",
+        "selector:apx:generate",
+        "selector:generate:apx"
+      ]
+    },
+    "apx:generate:service": {
+      "aliases": [],
+      "args": {},
+      "description": "Builds service-layer Apex artifacts for the provided basename and flavor.",
+      "examples": [
+        "Generate an AT4DX service set:\n<%= config.bin %> <%= command.id %> --target-org myOrg --service-basename LimitMonitors --at4dx"
+      ],
+      "flags": {
+        "json": {
+          "description": "Format output as json.",
+          "helpGroup": "GLOBAL",
+          "name": "json",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "flags-dir": {
+          "helpGroup": "GLOBAL",
+          "name": "flags-dir",
+          "summary": "Import flag values from a directory.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "target-org": {
+          "char": "o",
+          "name": "target-org",
+          "noCacheDefault": true,
+          "summary": "Target org username or alias.",
+          "hasDynamicHelp": true,
+          "multiple": false,
+          "type": "option"
+        },
+        "service-basename": {
+          "name": "service-basename",
+          "required": true,
+          "summary": "Base name used for generated service classes.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "at4dx": {
+          "name": "at4dx",
+          "summary": "Generate AT4DX-flavor artifacts.",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "fflib": {
+          "name": "fflib",
+          "summary": "Generate fflib-flavor artifacts.",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "api-version": {
+          "char": "a",
+          "description": "Override the api version used for api requests made by this command",
+          "name": "api-version",
+          "summary": "Override the API version used for the org connection.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "output-path": {
+          "char": "p",
+          "name": "output-path",
+          "summary": "Output folder relative to the Salesforce project root.",
+          "default": "generated-files",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "prefix": {
+          "name": "prefix",
+          "summary": "Optional namespace-style class prefix.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "dry-run": {
+          "name": "dry-run",
+          "summary": "Render and validate generation output without writing files.",
+          "allowNo": false,
+          "type": "boolean"
+        }
+      },
+      "hasDynamicHelp": true,
+      "hiddenAliases": [],
+      "id": "apx:generate:service",
+      "pluginAlias": "@syntax-syllogism/apx",
+      "pluginName": "@syntax-syllogism/apx",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Generate service facade/interface/implementation classes and metadata.",
+      "enableJsonFlag": true,
+      "isESM": true,
+      "relativePath": [
+        "lib",
+        "commands",
+        "apx",
+        "generate",
+        "service.js"
+      ],
+      "aliasPermutations": [],
+      "permutations": [
+        "apx:generate:service",
+        "generate:apx:service",
+        "generate:service:apx",
+        "apx:service:generate",
+        "service:apx:generate",
+        "service:generate:apx"
+      ]
+    },
+    "apx:generate:unitofwork": {
+      "aliases": [],
+      "args": {},
+      "description": "Creates AT4DX unit-of-work binding metadata or prints the fflib Application snippet.",
+      "examples": [
+        "Generate AT4DX unit-of-work binding:\n<%= config.bin %> <%= command.id %> --target-org myOrg --sobject Account --at4dx"
+      ],
+      "flags": {
+        "json": {
+          "description": "Format output as json.",
+          "helpGroup": "GLOBAL",
+          "name": "json",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "flags-dir": {
+          "helpGroup": "GLOBAL",
+          "name": "flags-dir",
+          "summary": "Import flag values from a directory.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "target-org": {
+          "char": "o",
+          "name": "target-org",
+          "noCacheDefault": true,
+          "required": true,
+          "summary": "Target org username or alias.",
+          "hasDynamicHelp": true,
+          "multiple": false,
+          "type": "option"
+        },
+        "sobject": {
+          "char": "s",
+          "name": "sobject",
+          "required": true,
+          "summary": "SObject API name used for generated artifacts.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "at4dx": {
+          "name": "at4dx",
+          "summary": "Generate AT4DX-flavor artifacts.",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "fflib": {
+          "name": "fflib",
+          "summary": "Generate fflib-flavor artifacts.",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "api-version": {
+          "char": "a",
+          "description": "Override the api version used for api requests made by this command",
+          "name": "api-version",
+          "summary": "Override the API version used for the org connection.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "binding-sequence": {
+          "char": "b",
+          "name": "binding-sequence",
+          "summary": "Binding sequence value for AT4DX unit-of-work metadata.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "output-path": {
+          "char": "p",
+          "name": "output-path",
+          "summary": "Output folder relative to the Salesforce project root.",
+          "default": "generated-files",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "prefix": {
+          "name": "prefix",
+          "summary": "Optional namespace-style class prefix.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "dry-run": {
+          "name": "dry-run",
+          "summary": "Render and validate generation output without writing files.",
+          "allowNo": false,
+          "type": "boolean"
+        }
+      },
+      "hasDynamicHelp": true,
+      "hiddenAliases": [],
+      "id": "apx:generate:unitofwork",
+      "pluginAlias": "@syntax-syllogism/apx",
+      "pluginName": "@syntax-syllogism/apx",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Generate unit-of-work binding metadata for an SObject.",
+      "enableJsonFlag": true,
+      "isESM": true,
+      "relativePath": [
+        "lib",
+        "commands",
+        "apx",
+        "generate",
+        "unitofwork.js"
+      ],
+      "aliasPermutations": [],
+      "permutations": [
+        "apx:generate:unitofwork",
+        "generate:apx:unitofwork",
+        "generate:unitofwork:apx",
+        "apx:unitofwork:generate",
+        "unitofwork:apx:generate",
+        "unitofwork:generate:apx"
+      ]
+    },
+    "apx:generate:selector:field-injection": {
+      "aliases": [],
+      "args": {},
+      "description": "Creates a FieldSet and SelectorConfig_FieldSetInclusion binding offline from a comma-separated field list.",
+      "examples": [
+        "Generate field-injection metadata:\n<%= config.bin %> <%= command.id %> -s Account --fields Name,Industry"
+      ],
+      "flags": {
+        "json": {
+          "description": "Format output as json.",
+          "helpGroup": "GLOBAL",
+          "name": "json",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "flags-dir": {
+          "helpGroup": "GLOBAL",
+          "name": "flags-dir",
+          "summary": "Import flag values from a directory.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "sobject": {
+          "char": "s",
+          "name": "sobject",
+          "required": true,
+          "summary": "SObject API name used for generated artifacts.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "fields": {
+          "name": "fields",
+          "required": true,
+          "summary": "Comma-separated API names for field-set displayed fields.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "fieldset-name": {
+          "name": "fieldset-name",
+          "summary": "Optional field-set API name for selector field injection.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "label": {
+          "name": "label",
+          "summary": "Optional label value for generated metadata artifacts.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "description": {
+          "name": "description",
+          "summary": "Optional description value written into generated metadata.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "output-path": {
+          "char": "p",
+          "name": "output-path",
+          "summary": "Output folder relative to the Salesforce project root.",
+          "default": "generated-files",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "dry-run": {
+          "name": "dry-run",
+          "summary": "Render and validate generation output without writing files.",
+          "allowNo": false,
+          "type": "boolean"
+        }
+      },
+      "hasDynamicHelp": false,
+      "hiddenAliases": [],
+      "id": "apx:generate:selector:field-injection",
+      "pluginAlias": "@syntax-syllogism/apx",
+      "pluginName": "@syntax-syllogism/apx",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Generate AT4DX selector field-injection metadata (fieldset + binding).",
+      "enableJsonFlag": true,
+      "isESM": true,
+      "relativePath": [
+        "lib",
+        "commands",
+        "apx",
+        "generate",
+        "selector",
+        "field-injection.js"
+      ],
+      "aliasPermutations": [],
+      "permutations": [
+        "apx:generate:selector:field-injection",
+        "generate:apx:selector:field-injection",
+        "generate:selector:apx:field-injection",
+        "generate:selector:field-injection:apx",
+        "apx:selector:generate:field-injection",
+        "selector:apx:generate:field-injection",
+        "selector:generate:apx:field-injection",
+        "selector:generate:field-injection:apx",
+        "apx:selector:field-injection:generate",
+        "selector:apx:field-injection:generate",
+        "selector:field-injection:apx:generate",
+        "selector:field-injection:generate:apx",
+        "apx:generate:field-injection:selector",
+        "generate:apx:field-injection:selector",
+        "generate:field-injection:apx:selector",
+        "generate:field-injection:selector:apx",
+        "apx:field-injection:generate:selector",
+        "field-injection:apx:generate:selector",
+        "field-injection:generate:apx:selector",
+        "field-injection:generate:selector:apx",
+        "apx:field-injection:selector:generate",
+        "field-injection:apx:selector:generate",
+        "field-injection:selector:apx:generate",
+        "field-injection:selector:generate:apx"
+      ]
+    },
+    "apx:generate:selector:method": {
+      "aliases": [],
+      "args": {},
+      "description": "Creates method-injection scaffolding for an existing selector without requiring an org describe.",
+      "examples": [
+        "Generate selector method scaffolding:\n<%= config.bin %> <%= command.id %> -c SelectBySloganMethod --sobject-selector-class-name AccountsSelector -s Account"
+      ],
+      "flags": {
+        "json": {
+          "description": "Format output as json.",
+          "helpGroup": "GLOBAL",
+          "name": "json",
+          "allowNo": false,
+          "type": "boolean"
+        },
+        "flags-dir": {
+          "helpGroup": "GLOBAL",
+          "name": "flags-dir",
+          "summary": "Import flag values from a directory.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "sobject": {
+          "char": "s",
+          "name": "sobject",
+          "required": true,
+          "summary": "SObject API name used for generated artifacts.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "class-name": {
+          "char": "c",
+          "name": "class-name",
+          "required": true,
+          "summary": "Selector method-injection class name.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "sobject-selector-class-name": {
+          "name": "sobject-selector-class-name",
+          "required": true,
+          "summary": "Selector implementation class name used by method injection.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "api-version": {
+          "char": "a",
+          "description": "Override the api version used for api requests made by this command",
+          "name": "api-version",
+          "summary": "Override the API version used for the org connection.",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "output-path": {
+          "char": "p",
+          "name": "output-path",
+          "summary": "Output folder relative to the Salesforce project root.",
+          "default": "generated-files",
+          "hasDynamicHelp": false,
+          "multiple": false,
+          "type": "option"
+        },
+        "dry-run": {
+          "name": "dry-run",
+          "summary": "Render and validate generation output without writing files.",
+          "allowNo": false,
+          "type": "boolean"
+        }
+      },
+      "hasDynamicHelp": false,
+      "hiddenAliases": [],
+      "id": "apx:generate:selector:method",
+      "pluginAlias": "@syntax-syllogism/apx",
+      "pluginName": "@syntax-syllogism/apx",
+      "pluginType": "core",
+      "strict": true,
+      "summary": "Generate an AT4DX selector method-injection class and test.",
+      "enableJsonFlag": true,
+      "isESM": true,
+      "relativePath": [
+        "lib",
+        "commands",
+        "apx",
+        "generate",
+        "selector",
+        "method.js"
+      ],
+      "aliasPermutations": [],
+      "permutations": [
+        "apx:generate:selector:method",
+        "generate:apx:selector:method",
+        "generate:selector:apx:method",
+        "generate:selector:method:apx",
+        "apx:selector:generate:method",
+        "selector:apx:generate:method",
+        "selector:generate:apx:method",
+        "selector:generate:method:apx",
+        "apx:selector:method:generate",
+        "selector:apx:method:generate",
+        "selector:method:apx:generate",
+        "selector:method:generate:apx",
+        "apx:generate:method:selector",
+        "generate:apx:method:selector",
+        "generate:method:apx:selector",
+        "generate:method:selector:apx",
+        "apx:method:generate:selector",
+        "method:apx:generate:selector",
+        "method:generate:apx:selector",
+        "method:generate:selector:apx",
+        "apx:method:selector:generate",
+        "method:apx:selector:generate",
+        "method:selector:apx:generate",
+        "method:selector:generate:apx"
+      ]
+    }
+  },
+  "version": "0.1.0"
+}
