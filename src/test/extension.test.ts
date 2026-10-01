@@ -1,23 +1,29 @@
 import * as assert from 'assert';
-import { execFileSync } from 'child_process';
-import { EventEmitter } from 'events';
-import { mkdtempSync, readFileSync, writeFileSync } from 'fs';
+import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import * as vscode from 'vscode';
-import { pickFolder } from '../input/filePicker';
-import { gatherInputs, type BooleanPick, type InputApi, type PickOutputDirectoryOptions } from '../input/gatherInputs';
-import { pickOutputDirectory } from '../input/outputDirPicker';
-import { showWorkspaceQuickPick } from '../input/workspaceQuickPick';
-import { prioritizeOrgChoices } from '../input/orgPicker';
-import { commands } from '../registry/commands.generated';
+import type { GenerationPreview } from '@syntax-syllogism/apx-core' with { 'resolution-mode': 'import' };
+import { findProjectRoots } from '../extension';
+import { loadApxCore, type ApxCore } from '../core/load';
+import type { OrgService } from '../core/orgService';
+import { gatherInputs, type GatheredInputs, type InputApi } from '../input/gatherInputs';
+import { NO_ORG } from '../input/orgPicker';
+import { commandTable } from '../registry/commandTable';
+import { buildCommands } from '../registry/commands';
 import type { CommandDef } from '../registry/types';
-import { buildCliArgs, createCommandRunner, type RunnerDeps } from '../runner/commandRunner';
-import { ApxCommandsProvider } from '../tree/apxCommandsProvider';
+import { createCommandRunner, type RunnerDeps } from '../runner/commandRunner';
+import { newTrailingLines, overwriteDetail } from '../runner/render';
 import { LastValueStore } from '../util/memento';
+import { MemoryMemento, MemoryOutputChannel } from './helpers';
 
-suite('Apx extension', () => {
-	test('registry exposes the nine apx generate commands with known flag kinds', () => {
+const repositoryRoot = resolve(__dirname, '..', '..');
+
+suite('Apx registry', () => {
+	test('registry builds one command per apx-core descriptor with mapped ids', async () => {
+		const core = await loadApxCore();
+		const commands = buildCommands(core);
+		assert.deepStrictEqual(commands.map((command) => command.coreId), core.commandDescriptors.map((descriptor) => descriptor.id));
 		assert.deepStrictEqual(commands.map((command) => command.id), [
 			'apx.generate',
 			'apx.generate.selector',
@@ -28,908 +34,369 @@ suite('Apx extension', () => {
 			'apx.generate.selector.field-injection',
 			'apx.generate.action',
 			'apx.generate.criteria',
+			'apx.dead',
 		]);
-
-		const knownKinds = new Set(['org', 'file', 'outputDir', 'string', 'boolean', 'apiVersion', 'enum']);
+		const knownKinds = new Set(['org', 'file', 'folder', 'multiString', 'string', 'boolean', 'enum']);
 		for (const command of commands) {
-			for (const flag of command.flags) {
-				assert.ok(knownKinds.has(flag.kind), `${command.id}:${flag.name} has unknown kind ${flag.kind}`);
+			for (const input of command.inputs) {
+				assert.ok(knownKinds.has(input.kind), `${command.id}:${input.key} has unknown kind ${input.kind}`);
 			}
 		}
+		assert.deepStrictEqual(commands.filter((command) => command.kind === 'read').map((command) => command.id), ['apx.dead']);
+		assert.strictEqual(commandById(commands, 'apx.dead').group, 'Analyze');
+		assert.strictEqual(commandById(commands, 'apx.dead').inputs.find((input) => input.key === 'deadOnly')?.dependsOn, 'destructiveManifest');
+		assert.deepStrictEqual(commandById(commands, 'apx.generate.selector').inputs.find((input) => input.key === 'flavor')?.options, ['fflib', 'at4dx']);
+		assert.strictEqual(commandById(commands, 'apx.generate.selector').inputs.find((input) => input.key === 'outputPath')?.default, core.DEFAULT_OUTPUT_PATH);
 	});
 
-	test('registry captures required input metadata and per-command overrides', () => {
-		const generate = commandById('apx.generate');
-		assert.strictEqual(generate.group, 'AEP Generation');
-		assert.strictEqual(generate.subgroup, 'Pattern Layers');
-		assert.deepStrictEqual(generate.requireOneOf, ['selector', 'domain', 'unit-of-work']);
-		assert.strictEqual(generate.flags.find((flag) => flag.name === 'at4dx')?.exclusiveGroup, 'flavor');
-		assert.strictEqual(generate.flags.find((flag) => flag.name === 'fflib')?.exclusiveGroup, 'flavor');
-		const outputPath = generate.flags.find((flag) => flag.name === 'output-path');
-		assert.strictEqual(outputPath?.kind, 'outputDir');
-		assert.strictEqual(outputPath?.default, 'generated-files');
-
-		assert.ok(!commandById('apx.generate.action').flags.some((flag) => flag.name === 'target-org'));
-		assert.strictEqual(commandById('apx.generate.service').flags.find((flag) => flag.name === 'target-org')?.required, undefined);
-		assert.deepStrictEqual(commandById('apx.generate.action').flags.find((flag) => flag.name === 'trigger-operation')?.options, [
-			'Before_Insert',
-			'Before_Update',
-			'Before_Delete',
-			'After_Insert',
-			'After_Update',
-			'After_Delete',
-			'After_Undelete',
-		]);
-
-		assert.strictEqual(commandById('apx.generate.action').flags.find((flag) => flag.name === 'class-name')?.summary, 'Action class name to generate.');
-		assert.strictEqual(commandById('apx.generate.criteria').flags.find((flag) => flag.name === 'class-name')?.summary, 'Criteria class name to generate.');
-
-		assert.ok(!commands.some((command) => command.destructive));
-		assert.ok(!commands.some((command) => command.supportsNoPrompt));
+	test('org input follows requiresOrg', async () => {
+		const commands = buildCommands(await loadApxCore());
+		const org = (id: string) => commandById(commands, id).inputs.find((input) => input.kind === 'org');
+		assert.strictEqual(org('apx.generate.selector')?.required, true);
+		assert.strictEqual(org('apx.dead')?.required, true);
+		assert.strictEqual(org('apx.generate.service')?.required, false);
+		assert.strictEqual(org('apx.generate.action'), undefined);
+		assert.strictEqual(org('apx.generate.selector.field-injection'), undefined);
 	});
 
-	test('generated registry stays in sync with the checked-in manifest fixture', () => {
-		const repositoryRoot = resolve(__dirname, '..', '..');
-		const tempDir = mkdtempSync(join(tmpdir(), 'apx-codegen-'));
-		const registryPath = join(tempDir, 'commands.generated.ts');
-		const packagePath = join(tempDir, 'package.json');
-		writeFileSync(packagePath, readFileSync(join(repositoryRoot, 'package.json'), 'utf8'));
-
-		execFileSync('node', [
-			'--disable-warning=MODULE_TYPELESS_PACKAGE_JSON',
-			'--experimental-strip-types',
-			join(repositoryRoot, 'scripts', 'gen-commands.ts'),
-			join(repositoryRoot, 'vendor', 'apx.oclif.manifest.json'),
-			registryPath,
-			packagePath,
-		], { cwd: repositoryRoot });
-
-		assert.strictEqual(readFileSync(registryPath, 'utf8'), readFileSync(join(repositoryRoot, 'src', 'registry', 'commands.generated.ts'), 'utf8'));
-		const generatedPackage = JSON.parse(readFileSync(packagePath, 'utf8')) as { contributes: { commands: unknown } };
-		const currentPackage = JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8')) as { contributes: { commands: unknown } };
-		assert.deepStrictEqual(generatedPackage.contributes.commands, currentPackage.contributes.commands);
+	test('package.json contributes stay in sync with apx-core descriptors', async () => {
+		const core = await loadApxCore();
+		const pkg = JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8')) as { contributes: { commands: unknown } };
+		assert.deepStrictEqual(pkg.contributes.commands, core.commandDescriptors.map((descriptor) => ({
+			command: commandTable[descriptor.id].id,
+			title: commandTable[descriptor.id].title,
+		})));
 	});
 
-	test('gatherInputs aborts when a required org is cancelled', async () => {
-		const command = commandById('apx.generate.selector');
-		const store = new LastValueStore(new MemoryMemento());
-		await store.set(command.id, 'target-org', 'previous-org');
-		const inputApi: InputApi = {
-			pickOrg: async () => undefined,
-			pickFile: async () => undefined,
-			pickFolder: async () => undefined,
-			pickOutputDirectory: async () => undefined,
-			showInputBox: async () => 'Account',
-			showQuickPick: async (items) => items[0],
-			showBooleanPick: async () => [],
-			showWarningMessage: async () => undefined,
-		};
-
-		assert.strictEqual(await gatherInputs(command, store, inputApi), undefined);
+	test('extension source never spawns processes', () => {
+		const offenders = sourceFiles(join(repositoryRoot, 'src'))
+			.filter((file) => !file.includes(`${join('src', 'test')}`))
+			.filter((file) => /child_process|cross-spawn/.test(readFileSync(file, 'utf8')));
+		assert.deepStrictEqual(offenders, []);
 	});
 
-	test('prioritizeOrgChoices moves the last-used org first without changing cancel semantics', () => {
-		const choices = [
-			{ label: 'one', value: 'one' },
-			{ label: 'two', value: 'two' },
-		];
-
-		assert.deepStrictEqual(prioritizeOrgChoices(choices, 'two').map((choice) => choice.value), ['two', 'one']);
-		assert.deepStrictEqual(prioritizeOrgChoices(choices).map((choice) => choice.value), ['one', 'two']);
+	test('extension host runs Node 22 or later', () => {
+		assert.ok(Number(process.versions.node.split('.')[0]) >= 22, process.versions.node);
 	});
 
-	test('pickFolder returns project-relative paths and root as dot', async () => {
-		await withWorkspaceFolders(['/repo'], async () => {
-			await withOpenDialog([vscode.Uri.file('/repo/force-app')], async () => {
-				assert.strictEqual(await pickFolder('Output folder'), 'force-app');
-			});
-
-			await withOpenDialog([vscode.Uri.file('/repo')], async () => {
-				assert.strictEqual(await pickFolder('Output folder'), '.');
-			});
-		});
-	});
-
-	test('pickFolder rejects out-of-workspace folders', async () => {
-		const warnings: string[] = [];
-		await withWorkspaceFolders(['/repo'], async () => {
-			await withOpenDialog([vscode.Uri.file('/outside')], async () => {
-				await withWarningMessage(async (message) => {
-					warnings.push(message);
-					return undefined;
-				}, async () => {
-					assert.strictEqual(await pickFolder('Output folder'), undefined);
-				});
-			});
-		});
-
-		assert.deepStrictEqual(warnings, ['Choose a folder inside the current workspace.']);
-	});
-
-	test('showWorkspaceQuickPick injects last-used first, deduplicates, and returns undefined on cancel', async () => {
-		const capturedItems: vscode.QuickPickItem[][] = [];
-		await withQuickPick((items) => {
-			capturedItems.push([...items]);
-			return items[0];
-		}, async () => {
-			const result = await showWorkspaceQuickPick({
-				items: [
-					{ label: 'force-app', value: 'force-app' },
-					{ label: 'force-app duplicate', value: 'force-app' },
-					{ label: 'generated-files', value: 'generated-files' },
-				],
-				lastValue: 'force-app',
-				placeHolder: 'Pick a folder',
-			});
-			assert.strictEqual(result, 'force-app');
-		});
-
-		assert.deepStrictEqual(capturedItems[0].map((item) => (item as unknown as { value: string }).value), [
-			'force-app',
-			'generated-files',
-		]);
-
-		await withQuickPick(() => undefined, async () => {
-			const result = await showWorkspaceQuickPick({
-				items: [{ label: 'force-app', value: 'force-app' }],
-				placeHolder: 'Pick a folder',
-			});
-			assert.strictEqual(result, undefined);
-		});
-	});
-
-	test('gatherInputs chooses exactly one AEP flavor flag', async () => {
-		const command = commandById('apx.generate.selector');
-		const store = new LastValueStore(new MemoryMemento());
-		const inputApi: InputApi = {
-			pickOrg: async () => 'dev',
-			pickFile: async () => undefined,
-			pickFolder: async () => undefined,
-			pickOutputDirectory: async () => undefined,
-			showInputBox: async (options) => options.prompt?.includes('SObject') ? 'Account' : '',
-			showQuickPick: async (items) => items.find((item) => item.label === 'AT4DX'),
-			showBooleanPick: async () => [],
-			showWarningMessage: async () => undefined,
-		};
-
-		const result = await gatherInputs(command, store, inputApi);
-
-		assert.ok(result?.args.includes('--at4dx'));
-		assert.ok(!result?.args.includes('--fflib'));
-	});
-
-	test('gatherInputs aborts when AEP flavor selection is cancelled', async () => {
-		const command = commandById('apx.generate.selector');
-		const store = new LastValueStore(new MemoryMemento());
-		const inputApi: InputApi = {
-			pickOrg: async () => 'dev',
-			pickFile: async () => undefined,
-			pickFolder: async () => undefined,
-			pickOutputDirectory: async () => undefined,
-			showInputBox: async (options) => options.prompt?.includes('SObject') ? 'Account' : '',
-			showQuickPick: async () => undefined,
-			showBooleanPick: async () => [],
-			showWarningMessage: async () => undefined,
-		};
-
-		assert.strictEqual(await gatherInputs(command, store, inputApi), undefined);
-	});
-
-	test('gatherInputs emits output-path only when a directory is picked', async () => {
-		const command = commandById('apx.generate.selector');
-		const store = new LastValueStore(new MemoryMemento());
-		const inputApi: InputApi = {
-			pickOrg: async () => 'dev',
-			pickFile: async () => undefined,
-			pickFolder: async () => undefined,
-			pickOutputDirectory: async () => 'force-app',
-			showInputBox: async (options) => options.prompt?.includes('SObject') ? 'Account' : '',
-			showQuickPick: async (items) => items.find((item) => item.label === 'fflib'),
-			showBooleanPick: async () => [],
-			showWarningMessage: async () => undefined,
-		};
-
-		assert.deepStrictEqual((await gatherInputs(command, store, inputApi))?.args, [
-			'--target-org', 'dev',
-			'--sobject', 'Account',
-			'--fflib',
-			'--output-path', 'force-app',
-		]);
-
-		const cancelDirApi: InputApi = {
-			...inputApi,
-			pickOutputDirectory: async () => undefined,
-		};
-		const cancelledDir = await gatherInputs(command, new LastValueStore(new MemoryMemento()), cancelDirApi);
-		assert.ok(!cancelledDir?.args.includes('--output-path'));
-	});
-
-	test('gatherInputs handles enum and org-less AEP commands', async () => {
-		const command = commandById('apx.generate.action');
-		let pickedOrg = false;
-		let inputCount = 0;
-		const store = new LastValueStore(new MemoryMemento());
-		const inputApi: InputApi = {
-			pickOrg: async () => {
-				pickedOrg = true;
-				return 'dev';
-			},
-			pickFile: async () => undefined,
-			pickFolder: async () => undefined,
-			pickOutputDirectory: async () => undefined,
-			showInputBox: async () => {
-				if (inputCount === 0) {
-					inputCount += 1;
-					return 'Account';
-				}
-				if (inputCount === 1) {
-					inputCount += 1;
-					return 'AccountAction';
-				}
-				return '';
-			},
-			showQuickPick: async (items) => items.find((item) => item.label === 'After_Update'),
-			showBooleanPick: async () => [],
-			showWarningMessage: async () => undefined,
-		};
-
-		const result = await gatherInputs(command, store, inputApi);
-
-		assert.strictEqual(pickedOrg, false);
-		assert.deepStrictEqual(result?.args, [
-			'--sobject', 'Account',
-			'--class-name', 'AccountAction',
-			'--trigger-operation', 'After_Update',
-		]);
-	});
-
-	test('gatherInputs lets optional AEP service org be skipped', async () => {
-		const command = commandById('apx.generate.service');
-		const store = new LastValueStore(new MemoryMemento());
-		let inputCount = 0;
-		const inputApi: InputApi = {
-			pickOrg: async () => undefined,
-			pickFile: async () => undefined,
-			pickFolder: async () => undefined,
-			pickOutputDirectory: async () => undefined,
-			showInputBox: async () => inputCount++ === 0 ? 'Billing' : '',
-			showQuickPick: async (items) => items.find((item) => item.label === 'AT4DX'),
-			showBooleanPick: async () => [],
-			showWarningMessage: async () => undefined,
-		};
-
-		const result = await gatherInputs(command, store, inputApi);
-
-		assert.deepStrictEqual(result?.args, [
-			'--service-basename', 'Billing',
-			'--at4dx',
-		]);
-	});
-
-	test('gatherInputs enforces aggregate AEP artifact selection', async () => {
-		const command = commandById('apx.generate');
-		const warnings: string[] = [];
-		const baseInputApi: InputApi = {
-			pickOrg: async () => 'dev',
-			pickFile: async () => undefined,
-			pickFolder: async () => undefined,
-			pickOutputDirectory: async () => undefined,
-			showInputBox: async (options) => options.prompt?.includes('SObject') ? 'Account' : '',
-			showQuickPick: async (items) => items.find((item) => item.label === 'AT4DX'),
-			showBooleanPick: async () => [],
-			showWarningMessage: async (message) => {
-				warnings.push(message);
-				return undefined;
-			},
-		};
-
-		assert.strictEqual(await gatherInputs(command, new LastValueStore(new MemoryMemento()), baseInputApi), undefined);
-		assert.deepStrictEqual(warnings, ['Select at least one of: --selector, --domain, --unit-of-work']);
-
-		const selected = await gatherInputs(command, new LastValueStore(new MemoryMemento()), {
-			...baseInputApi,
-			showBooleanPick: async (items) => items.filter((item) => item.flag.name === 'selector'),
-		});
-		assert.ok(selected?.args.includes('--selector'));
-	});
-
-	test('buildCliArgs never injects no-prompt for apx commands (none support it)', () => {
-		const selector = commandById('apx.generate.selector');
-
-		assert.deepStrictEqual(buildCliArgs(selector, ['--target-org', 'dev', '--sobject', 'Account', '--at4dx']), [
-			'apx', 'generate', 'selector',
-			'--target-org', 'dev',
-			'--sobject', 'Account',
-			'--at4dx',
-		]);
-
-		const action = commandById('apx.generate.action');
-		assert.deepStrictEqual(buildCliArgs(action, ['--sobject', 'Account', '--class-name', 'AccountAction']), [
-			'apx', 'generate', 'action',
-			'--sobject', 'Account',
-			'--class-name', 'AccountAction',
-		]);
-	});
-
-	test('runner executes AEP without prompt injection and offers to open the output folder', async () => {
-		const selector = commandById('apx.generate.selector');
-		const spawnedArgs: string[][] = [];
-		const infos: string[] = [];
-		const opened: unknown[][] = [];
-		const runner = createCommandRunner({
-			output: new MemoryOutputChannel(),
-			workspaceFolder: '/repo',
-			spawnProcess: (_file, args) => {
-				spawnedArgs.push([...args]);
-				return fakeChildProcess('Generated selector');
-			},
-			withProgress: async (_options, task) => task({ report: () => undefined }, new vscode.CancellationTokenSource().token),
-			showInformationMessage: async (message: string) => {
-				infos.push(message);
-				return 'Open Folder' as never;
-			},
-			showWarningMessage: async () => undefined as never,
-			showErrorMessage: async () => undefined as never,
-			executeCommand: <T = unknown>(...args: unknown[]): Thenable<T> => {
-				opened.push(args);
-				return Promise.resolve(undefined as T);
-			},
-		} satisfies RunnerDeps);
-
-		await runner.run(selector, {
-			args: ['--target-org', 'dev', '--sobject', 'Account', '--at4dx'],
-			displayArgs: ['--target-org', 'dev', '--sobject', 'Account', '--at4dx'],
-		});
-
-		assert.deepStrictEqual(spawnedArgs, [[
-			'apx', 'generate', 'selector',
-			'--target-org', 'dev',
-			'--sobject', 'Account',
-			'--at4dx',
-		]]);
-		assert.ok(!spawnedArgs[0].includes('--no-prompt'));
-		assert.ok(!spawnedArgs[0].includes('--json'));
-		assert.deepStrictEqual(infos, ['SF Apx: Generate Selector completed.']);
-		assert.strictEqual(opened[0][0], 'revealInExplorer');
-		assert.strictEqual((opened[0][1] as vscode.Uri).fsPath, join('/repo', 'generated-files'));
-	});
-
-	test('runner does not offer to open output folder after AEP dry-run', async () => {
-		const selector = commandById('apx.generate.selector');
-		const infos: string[] = [];
-		const opened: unknown[][] = [];
-		const runner = createCommandRunner({
-			output: new MemoryOutputChannel(),
-			workspaceFolder: '/repo',
-			spawnProcess: () => fakeChildProcess('Generated selector'),
-			withProgress: async (_options, task) => task({ report: () => undefined }, new vscode.CancellationTokenSource().token),
-			showInformationMessage: async (message: string) => {
-				infos.push(message);
-				return 'Open Folder' as never;
-			},
-			showWarningMessage: async () => undefined as never,
-			showErrorMessage: async () => undefined as never,
-			executeCommand: <T = unknown>(...args: unknown[]): Thenable<T> => {
-				opened.push(args);
-				return Promise.resolve(undefined as T);
-			},
-		} satisfies RunnerDeps);
-
-		await runner.run(selector, {
-			args: ['--target-org', 'dev', '--sobject', 'Account', '--at4dx', '--dry-run'],
-			displayArgs: ['--target-org', 'dev', '--sobject', 'Account', '--at4dx', '--dry-run'],
-		});
-
-		assert.deepStrictEqual(infos, ['SF Apx: Generate Selector completed.']);
-		assert.deepStrictEqual(opened, []);
-	});
-
-	test('runner strips ANSI output and reports JSON-envelope failures', async () => {
-		const selector = commandById('apx.generate.selector');
-		const errors: string[] = [];
-		const infos: string[] = [];
-		const output = new MemoryOutputChannel();
-		const runner = createCommandRunner({
-			output,
-			spawnProcess: () => fakeChildProcess('[31m{"status":1,"message":"bad"}[0m', 0),
-			withProgress: async (_options, task) => task({ report: () => undefined }, new vscode.CancellationTokenSource().token),
-			showInformationMessage: async (message: string) => {
-				infos.push(message);
-				return 'Run' as never;
-			},
-			showWarningMessage: async () => undefined as never,
-			showErrorMessage: async (message: string) => {
-				errors.push(message);
-				return undefined as never;
-			},
-		} satisfies RunnerDeps);
-
-		await runner.run(selector, { args: ['--target-org', 'dev', '--sobject', 'Account', '--at4dx'], displayArgs: ['--target-org', 'dev', '--sobject', 'Account', '--at4dx'] });
-
-		assert.match(output.value, /"status":1/);
-		assert.doesNotMatch(output.value, //);
-		assert.deepStrictEqual(errors, ['SF Apx: Generate Selector failed. See the Apx output channel.']);
-		assert.deepStrictEqual(infos, []);
-	});
-
-	test('runner treats cancellation as a user stop, not a failure', async () => {
-		const selector = commandById('apx.generate.selector');
-		const errors: string[] = [];
-		const infos: string[] = [];
-		const spawnedArgs: string[][] = [];
-		const output = new MemoryOutputChannel();
-		const runner = createCommandRunner({
-			output,
-			spawnProcess: (_file, args) => {
-				spawnedArgs.push([...args]);
-				return fakeCancellableChildProcess();
-			},
-			withProgress: async (_options, task) => {
-				const source = new vscode.CancellationTokenSource();
-				const promise = task({ report: () => undefined }, source.token);
-				source.cancel();
-				return promise;
-			},
-			showInformationMessage: async (message: string) => {
-				infos.push(message);
-				return 'Run' as never;
-			},
-			showWarningMessage: async () => undefined as never,
-			showErrorMessage: async (message: string) => {
-				errors.push(message);
-				return undefined as never;
-			},
-		} satisfies RunnerDeps);
-
-		await runner.run(selector, { args: ['--target-org', 'dev', '--sobject', 'Account', '--at4dx'], displayArgs: ['--target-org', 'dev', '--sobject', 'Account', '--at4dx'] });
-
-		assert.deepStrictEqual(errors, []);
-		assert.deepStrictEqual(infos, []);
-		assert.deepStrictEqual(spawnedArgs, [['apx', 'generate', 'selector', '--target-org', 'dev', '--sobject', 'Account', '--at4dx']]);
-	});
-
-	test('runner surfaces a JSON result summary when one is available', async () => {
-		const selector = commandById('apx.generate.selector');
-		const infos: string[] = [];
-		const runner = createCommandRunner({
-			output: new MemoryOutputChannel(),
-			spawnProcess: () => fakeChildProcess('{"status":0,"result":{"summary":"Selector generated"}}'),
-			withProgress: async (_options, task) => task({ report: () => undefined }, new vscode.CancellationTokenSource().token),
-			showInformationMessage: async (message: string) => {
-				infos.push(message);
-				return 'Run' as never;
-			},
-			showWarningMessage: async () => undefined as never,
-			showErrorMessage: async () => undefined as never,
-		} satisfies RunnerDeps);
-
-		await runner.run(selector, { args: ['--target-org', 'dev', '--sobject', 'Account', '--at4dx'], displayArgs: ['--target-org', 'dev', '--sobject', 'Account', '--at4dx'] });
-
-		assert.deepStrictEqual(infos, [
-			'Selector generated',
-		]);
-	});
-
-	test('runner logs malformed JSON-like output and falls back to process exit code', async () => {
-		const selector = commandById('apx.generate.selector');
-		const infos: string[] = [];
-		const errors: string[] = [];
-		const output = new MemoryOutputChannel();
-		const runner = createCommandRunner({
-			output,
-			spawnProcess: () => fakeChildProcess('{"status":0,', 0),
-			withProgress: async (_options, task) => task({ report: () => undefined }, new vscode.CancellationTokenSource().token),
-			showInformationMessage: async (message: string) => {
-				infos.push(message);
-				return 'Run' as never;
-			},
-			showWarningMessage: async () => undefined as never,
-			showErrorMessage: async (message: string) => {
-				errors.push(message);
-				return undefined as never;
-			},
-		} satisfies RunnerDeps);
-
-		await runner.run(selector, { args: ['--target-org', 'dev', '--sobject', 'Account', '--at4dx'], displayArgs: ['--target-org', 'dev', '--sobject', 'Account', '--at4dx'] });
-
-		assert.match(output.value, /\[debug\] Unable to parse Salesforce CLI JSON envelope:/);
-		assert.deepStrictEqual(infos, ['SF Apx: Generate Selector completed.']);
-		assert.deepStrictEqual(errors, []);
-	});
-
-	test('gatherInputs passes flag default and last-used value into pickOutputDirectory options', async () => {
-		const command = commandById('apx.generate.selector');
-		const store = new LastValueStore(new MemoryMemento());
-		await store.set(command.id, 'output-path', 'my-output');
-		const receivedOptions: PickOutputDirectoryOptions[] = [];
-		const inputApi: InputApi = {
-			pickOrg: async () => 'dev',
-			pickFile: async () => undefined,
-			pickFolder: async () => undefined,
-			pickOutputDirectory: async (opts) => {
-				receivedOptions.push(opts);
-				return undefined;
-			},
-			showInputBox: async (options) => options.prompt?.includes('SObject') ? 'Account' : '',
-			showQuickPick: async (items) => items.find((item) => item.label === 'AT4DX'),
-			showBooleanPick: async () => [],
-			showWarningMessage: async () => undefined,
-		};
-
-		await gatherInputs(command, store, inputApi);
-
-		const outputOpts = receivedOptions.find((opts) => opts.flag.name === 'output-path');
-		assert.ok(outputOpts, 'pickOutputDirectory should be called for output-path flag');
-		assert.strictEqual(outputOpts.defaultValue, 'generated-files');
-		assert.strictEqual(outputOpts.lastValue, 'my-output');
-	});
-
-	test('gatherInputs stores picked output directory for next invocation', async () => {
-		const command = commandById('apx.generate.selector');
-		const store = new LastValueStore(new MemoryMemento());
-		const inputApi: InputApi = {
-			pickOrg: async () => 'dev',
-			pickFile: async () => undefined,
-			pickFolder: async () => undefined,
-			pickOutputDirectory: async () => 'custom-output',
-			showInputBox: async (options) => options.prompt?.includes('SObject') ? 'Account' : '',
-			showQuickPick: async (items) => items.find((item) => item.label === 'AT4DX'),
-			showBooleanPick: async () => [],
-			showWarningMessage: async () => undefined,
-		};
-
-		await gatherInputs(command, store, inputApi);
-
-		const receivedOptions: PickOutputDirectoryOptions[] = [];
-		const secondInputApi: InputApi = {
-			...inputApi,
-			pickOutputDirectory: async (opts) => {
-				receivedOptions.push(opts);
-				return undefined;
-			},
-		};
-		await gatherInputs(command, store, secondInputApi);
-		assert.strictEqual(receivedOptions.find((o) => o.flag.name === 'output-path')?.lastValue, 'custom-output');
-	});
-
-	test('pickOutputDirectory shows Quick Pick with default as first item', async () => {
-		const command = commandById('apx.generate.selector');
-		const flag = command.flags.find((f) => f.name === 'output-path')!;
-		const capturedItems: vscode.QuickPickItem[][] = [];
-
-		await withWorkspaceFolders(['/repo'], async () => {
-			await withQuickPick((items) => {
-				capturedItems.push([...items]);
-				return items[0];
-			}, async () => {
-				const result = await pickOutputDirectory({ command, flag, label: 'Output folder', defaultValue: 'generated-files' });
-				assert.strictEqual(result, 'generated-files');
-			});
-		});
-
-		const items = capturedItems[0];
-		assert.ok(items, 'showQuickPick should have been called');
-		assert.strictEqual(items[0].label, 'generated-files');
-		assert.strictEqual(items[0].description, 'Default');
-	});
-
-	test('pickOutputDirectory includes last-used as second item when different from default', async () => {
-		const command = commandById('apx.generate.selector');
-		const flag = command.flags.find((f) => f.name === 'output-path')!;
-		const capturedItems: vscode.QuickPickItem[][] = [];
-
-		await withWorkspaceFolders(['/repo'], async () => {
-			await withQuickPick((items) => {
-				capturedItems.push([...items]);
-				return undefined;
-			}, async () => {
-				await pickOutputDirectory({
-					command, flag, label: 'Output folder',
-					defaultValue: 'generated-files',
-					lastValue: 'force-app',
-				});
-			});
-		});
-
-		const items = capturedItems[0];
-		assert.strictEqual(items[0].label, 'generated-files');
-		assert.strictEqual(items[0].description, 'Default');
-		assert.strictEqual(items[1].label, 'force-app');
-		assert.strictEqual(items[1].description, 'Last used');
-	});
-
-	test('pickOutputDirectory returns undefined when Quick Pick is cancelled', async () => {
-		const command = commandById('apx.generate.selector');
-		const flag = command.flags.find((f) => f.name === 'output-path')!;
-
-		await withWorkspaceFolders(['/repo'], async () => {
-			await withQuickPick(() => undefined, async () => {
-				const result = await pickOutputDirectory({ command, flag, label: 'Output folder', defaultValue: 'generated-files' });
-				assert.strictEqual(result, undefined);
-			});
-		});
-	});
-
-	test('pickOutputDirectory falls back to folder picker for Choose Different Folder', async () => {
-		const command = commandById('apx.generate.selector');
-		const flag = command.flags.find((f) => f.name === 'output-path')!;
-
-		await withWorkspaceFolders(['/repo'], async () => {
-			await withQuickPick((items) => items.find((item) => item.label.includes('Choose Different Folder')), async () => {
-				await withOpenDialog([vscode.Uri.file('/repo/custom-dir')], async () => {
-					const result = await pickOutputDirectory({ command, flag, label: 'Output folder', defaultValue: 'generated-files' });
-					assert.strictEqual(result, 'custom-dir');
-				});
-			});
-		});
-	});
-
-	test('pickOutputDirectory rejects out-of-workspace folders from custom fallback', async () => {
-		const command = commandById('apx.generate.selector');
-		const flag = command.flags.find((f) => f.name === 'output-path')!;
-		const warnings: string[] = [];
-
-		await withWorkspaceFolders(['/repo'], async () => {
-			await withQuickPick((items) => items.find((item) => item.label.includes('Choose Different Folder')), async () => {
-				await withOpenDialog([vscode.Uri.file('/outside')], async () => {
-					await withWarningMessage(async (msg) => {
-						warnings.push(msg);
-						return undefined;
-					}, async () => {
-						const result = await pickOutputDirectory({ command, flag, label: 'Output folder', defaultValue: 'generated-files' });
-						assert.strictEqual(result, undefined);
-					});
-				});
-			});
-		});
-
-		assert.deepStrictEqual(warnings, ['Choose a folder inside the current workspace.']);
-	});
-
-	test('pickOutputDirectory discovers sfdx-project.json package directories', async () => {
-		const command = commandById('apx.generate.selector');
-		const flag = command.flags.find((f) => f.name === 'output-path')!;
-		const tempDir = mkdtempSync(join(tmpdir(), 'apx-test-'));
-		writeFileSync(join(tempDir, 'sfdx-project.json'), JSON.stringify({
-			packageDirectories: [
-				{ path: 'force-app', default: true },
-				{ path: 'packages/shared' },
-			],
-		}));
-		const capturedItems: vscode.QuickPickItem[][] = [];
-
-		await withWorkspaceFolders([tempDir], async () => {
-			await withQuickPick((items) => {
-				capturedItems.push([...items]);
-				return undefined;
-			}, async () => {
-				await pickOutputDirectory({ command, flag, label: 'Output folder', defaultValue: 'generated-files' });
-			});
-		});
-
-		const labels = capturedItems[0].map((item) => item.label);
-		assert.ok(labels.includes('force-app'), 'should include default package dir');
-		assert.ok(labels.includes('packages/shared'), 'should include other package dirs');
-	});
-
-	test('pickOutputDirectory puts sfdx default package before non-default packages', async () => {
-		const command = commandById('apx.generate.selector');
-		const flag = command.flags.find((f) => f.name === 'output-path')!;
-		const tempDir = mkdtempSync(join(tmpdir(), 'apx-test-'));
-		writeFileSync(join(tempDir, 'sfdx-project.json'), JSON.stringify({
-			packageDirectories: [
-				{ path: 'packages/shared' },
-				{ path: 'force-app', default: true },
-			],
-		}));
-		const capturedItems: vscode.QuickPickItem[][] = [];
-
-		await withWorkspaceFolders([tempDir], async () => {
-			await withQuickPick((items) => {
-				capturedItems.push([...items]);
-				return undefined;
-			}, async () => {
-				await pickOutputDirectory({ command, flag, label: 'Output folder', defaultValue: 'generated-files' });
-			});
-		});
-
-		const packageItems = capturedItems[0].filter((item) => item.description === 'Package directory');
-		assert.strictEqual(packageItems[0].label, 'force-app');
-		assert.strictEqual(packageItems[1].label, 'packages/shared');
-	});
-
-	test('pickOutputDirectory ignores malformed sfdx-project.json without throwing', async () => {
-		const command = commandById('apx.generate.selector');
-		const flag = command.flags.find((f) => f.name === 'output-path')!;
-		const tempDir = mkdtempSync(join(tmpdir(), 'apx-test-'));
-		writeFileSync(join(tempDir, 'sfdx-project.json'), 'not valid json {{{');
-
-		await withWorkspaceFolders([tempDir], async () => {
-			await withQuickPick(() => undefined, async () => {
-				const result = await pickOutputDirectory({ command, flag, label: 'Output folder', defaultValue: 'generated-files' });
-				assert.strictEqual(result, undefined);
-			});
-		});
-	});
-
-	test('pickOutputDirectory deduplicates candidates', async () => {
-		const command = commandById('apx.generate.selector');
-		const flag = command.flags.find((f) => f.name === 'output-path')!;
-		const tempDir = mkdtempSync(join(tmpdir(), 'apx-test-'));
-		writeFileSync(join(tempDir, 'sfdx-project.json'), JSON.stringify({
-			packageDirectories: [{ path: 'generated-files', default: true }],
-		}));
-		const capturedItems: vscode.QuickPickItem[][] = [];
-
-		await withWorkspaceFolders([tempDir], async () => {
-			await withQuickPick((items) => {
-				capturedItems.push([...items]);
-				return undefined;
-			}, async () => {
-				await pickOutputDirectory({
-					command, flag, label: 'Output folder',
-					defaultValue: 'generated-files',
-					lastValue: 'generated-files',
-				});
-			});
-		});
-
-		const generatedFilesItems = capturedItems[0].filter((item) => item.label === 'generated-files');
-		assert.strictEqual(generatedFilesItems.length, 1, 'generated-files should appear only once');
-		assert.strictEqual(generatedFilesItems[0].description, 'Default');
-	});
-
-	test('tree provider exposes a single AEP Generation group with nested subgroups', () => {
-		const provider = new ApxCommandsProvider(commands);
-		const groups = provider.getChildren();
-		assert.deepStrictEqual(groups.map((node) => node.type === 'group' ? node.label : ''), ['AEP Generation']);
-
-		const aep = groups[0];
-		assert.strictEqual(aep.type, 'group');
-		const subgroups = provider.getChildren(aep);
-		assert.deepStrictEqual(subgroups.map((node) => node.type === 'subgroup' ? node.label : ''), ['Pattern Layers', 'Selector Injection (AT4DX)', 'Domain Processes (AT4DX)']);
-
-		const generators = subgroups[0];
-		assert.strictEqual(generators.type, 'subgroup');
-		assert.deepStrictEqual(provider.getChildren(generators).map((node) => node.type === 'command' ? node.command.id : ''), [
-			'apx.generate',
-			'apx.generate.selector',
-			'apx.generate.domain',
-			'apx.generate.service',
-			'apx.generate.unitofwork',
-		]);
-
-		const injection = subgroups[1];
-		assert.strictEqual(injection.type, 'subgroup');
-		assert.deepStrictEqual(provider.getChildren(injection).map((node) => node.type === 'command' ? node.command.id : ''), [
-			'apx.generate.selector.method',
-			'apx.generate.selector.field-injection',
-		]);
-
-		const domainProcesses = subgroups[2];
-		assert.strictEqual(domainProcesses.type, 'subgroup');
-		assert.deepStrictEqual(provider.getChildren(domainProcesses).map((node) => node.type === 'command' ? node.command.id : ''), [
-			'apx.generate.action',
-			'apx.generate.criteria',
-		]);
+	test('findProjectRoots keeps only folders with sfdx-project.json', async () => {
+		const project = mkdtempSync(join(tmpdir(), 'apx-project-'));
+		const plain = mkdtempSync(join(tmpdir(), 'apx-plain-'));
+		writeFileSync(join(project, 'sfdx-project.json'), '{}');
+		assert.deepStrictEqual(await findProjectRoots([plain, project]), [project]);
 	});
 });
 
-function commandById(id: string): CommandDef {
+suite('Apx gatherInputs', () => {
+	test('aborts when a required org is cancelled', async () => {
+		const command = commandById(buildCommands(await loadApxCore()), 'apx.generate.selector');
+		const api = fakeInputApi({ pickOrg: async () => undefined });
+		assert.strictEqual(await gatherInputs(command, newStore(), api), undefined);
+	});
+
+	test('optional org offers "(none)" and omits the org when chosen', async () => {
+		const command = commandById(buildCommands(await loadApxCore()), 'apx.generate.service');
+		const optionalFlags: boolean[] = [];
+		const api = fakeInputApi({
+			pickOrg: async (_last, optional) => { optionalFlags.push(optional); return NO_ORG; },
+			answers: { 'Service basename': 'Billing' },
+		});
+		const inputs = await gatherInputs(command, newStore(), api);
+		assert.deepStrictEqual(optionalFlags, [true]);
+		assert.ok(inputs);
+		assert.strictEqual(inputs.org, undefined);
+		assert.strictEqual(inputs.options.serviceBasename, 'Billing');
+	});
+
+	test('commands without an org never ask for one', async () => {
+		const command = commandById(buildCommands(await loadApxCore()), 'apx.generate.selector.field-injection');
+		let asked = false;
+		const api = fakeInputApi({ pickOrg: async () => { asked = true; return 'org'; }, answers: { 'SObject API name': 'Account', 'Fields': 'Name' } });
+		const inputs = await gatherInputs(command, newStore(), api);
+		assert.ok(inputs);
+		assert.strictEqual(asked, false);
+		assert.strictEqual(inputs.org, undefined);
+	});
+
+	test('a schema failure warns and re-prompts the offending field', async () => {
+		const command = commandById(buildCommands(await loadApxCore()), 'apx.generate.selector.field-injection');
+		const fieldAnswers = [' , ', 'Name, Id'];
+		const warnings: string[] = [];
+		const api = fakeInputApi({
+			answers: { 'SObject API name': 'Account', 'Fields': () => fieldAnswers.shift() },
+			showWarningMessage: async (message) => { warnings.push(message); return undefined; },
+		});
+		const inputs = await gatherInputs(command, newStore(), api);
+		assert.ok(inputs);
+		assert.deepStrictEqual(inputs.options.fields, ['Name', 'Id']);
+		assert.strictEqual(warnings.length, 1);
+		assert.ok(warnings[0].startsWith('Fields: '), warnings[0]);
+	});
+
+	test('dead code booleans are explicit and the dependent option is asked only when enabled', async () => {
+		const command = commandById(buildCommands(await loadApxCore()), 'apx.dead');
+		const pickRounds: string[][] = [];
+		const api = fakeInputApi({
+			pickOrg: async () => 'dev',
+			showBooleanPick: async (items) => {
+				pickRounds.push(items.map((item) => item.input.key));
+				return items.filter((item) => item.input.key === 'classes' || item.input.key === 'destructiveManifest');
+			},
+		});
+		const store = newStore();
+		const inputs = await gatherInputs(command, store, api);
+		assert.ok(inputs);
+		assert.deepStrictEqual(pickRounds, [['classes', 'destructiveManifest', 'includeSuppressed'], ['deadOnly']]);
+		assert.strictEqual(inputs.org, 'dev');
+		assert.strictEqual(inputs.options.classes, true);
+		assert.strictEqual(inputs.options.destructiveManifest, true);
+		assert.strictEqual(inputs.options.includeSuppressed, false);
+		assert.strictEqual(inputs.options.deadOnly, false);
+		assert.strictEqual(store.get('dead', 'classes'), 'true');
+	});
+
+	test('last values are stored per descriptor id and option key', async () => {
+		const command = commandById(buildCommands(await loadApxCore()), 'apx.generate.selector');
+		const memento = new MemoryMemento();
+		const api = fakeInputApi({ pickOrg: async () => 'dev', answers: { 'SObject API name': 'Account' } });
+		assert.ok(await gatherInputs(command, new LastValueStore(memento), api));
+		assert.strictEqual(memento.get('apx.last.generate-selector.org'), 'dev');
+		assert.strictEqual(memento.get('apx.last.generate-selector.sobject'), 'Account');
+	});
+});
+
+suite('Apx command runner', () => {
+	test('previews new files and applies the same preview after Apply', async () => {
+		const real = await loadApxCore();
+		const preview = previewOf(['new']);
+		const harness = generationHarness(real, preview, { info: 'Apply' });
+		await harness.run();
+		assert.strictEqual(harness.applied.length, 1);
+		assert.strictEqual(harness.applied[0].preview, preview);
+		assert.strictEqual(harness.applied[0].overwrite, 'overwrite');
+		assert.ok(harness.calls.info.some((args) => args[0] === 'Write the files SF Apx: Generate Selector planned?'));
+		assert.ok(harness.output.value.includes('NEW  classes/AccountsSelector0.cls'), harness.output.value);
+		assert.ok(harness.output.value.includes('APPLIED'));
+		assert.deepStrictEqual(harness.calls.error, []);
+	});
+
+	test('existing files offer Overwrite all / Skip existing and pass the matching mode', async () => {
+		const real = await loadApxCore();
+		for (const [choice, overwrite] of [['Overwrite all', 'overwrite'], ['Skip existing', 'skip']] as const) {
+			const harness = generationHarness(real, previewOf(['new', 'exists']), { warning: choice });
+			await harness.run();
+			assert.deepStrictEqual(harness.applied.map((call) => call.overwrite), [overwrite]);
+			const modal = harness.calls.warning[0];
+			assert.deepStrictEqual(modal.slice(2), ['Overwrite all', 'Skip existing']);
+			assert.strictEqual((modal[1] as vscode.MessageOptions).modal, true);
+			assert.ok((modal[1] as vscode.MessageOptions).detail?.startsWith('1 new, 1 existing files in'));
+		}
+	});
+
+	test('cancelling the overwrite prompt writes nothing', async () => {
+		const harness = generationHarness(await loadApxCore(), previewOf(['exists']), { warning: undefined });
+		await harness.run();
+		assert.deepStrictEqual(harness.applied, []);
+		assert.ok(harness.calls.info.some((args) => args[0] === 'No files written.'));
+	});
+
+	test('a plan with only manual steps shows no modal', async () => {
+		const preview: GenerationPreview = { ...previewOf([]), manualSteps: ['Add the binding by hand.'] };
+		const harness = generationHarness(await loadApxCore(), preview, { info: 'Apply' });
+		await harness.run();
+		assert.deepStrictEqual(harness.applied, []);
+		assert.deepStrictEqual(harness.calls.warning, []);
+		assert.ok(harness.calls.info.every((args) => args.length === 1));
+		assert.ok(harness.calls.info.some((args) => String(args[0]).includes('manual steps')));
+	});
+
+	test('cancellation during apply is reported as a stop, not an error', async () => {
+		const real = await loadApxCore();
+		const harness = generationHarness(real, previewOf(['new']), { info: 'Apply' }, async () => { throw new real.ApxError('cancelled', 'Cancelled'); });
+		await harness.run();
+		assert.deepStrictEqual(harness.calls.error, []);
+		assert.deepStrictEqual(harness.calls.status, ['$(circle-slash) SF Apx: Generate Selector cancelled']);
+	});
+
+	test('failures surface describeError title and detail', async () => {
+		const harness = generationHarness(await loadApxCore(), previewOf(['new']), { info: 'Apply' }, async () => { throw new Error('disk full'); });
+		await harness.run();
+		assert.strictEqual(harness.calls.error[0][0], 'disk full');
+		assert.ok(harness.output.value.includes('Error: disk full'));
+	});
+
+	test('an expired session is invalidated and retried once', async () => {
+		const real = await loadApxCore();
+		let attempts = 0;
+		const harness = generationHarness(real, previewOf(['new']), { info: 'Apply' }, undefined, async () => {
+			attempts++;
+			if (attempts === 1) { throw Object.assign(new Error('expired'), { name: 'RefreshTokenAuthError' }); }
+		});
+		await harness.run();
+		assert.strictEqual(attempts, 2);
+		assert.deepStrictEqual(harness.orgCalls, ['connect:dev', 'invalidate:dev', 'connect:dev']);
+		assert.strictEqual(harness.applied.length, 1);
+	});
+
+	test('dead code writes its report and only writes the manifest after Write', async () => {
+		const real = await loadApxCore();
+		for (const answer of ['Write', undefined]) {
+			const harness = deadHarness(real, answer);
+			await harness.run();
+			assert.ok(harness.output.value.includes('DEAD REPORT'), harness.output.value);
+			assert.strictEqual(harness.calls.warning[0][0], `Write destructive manifest to ${join('/project/generated-files', 'dead-code')}?`);
+			assert.deepStrictEqual(harness.written, answer === 'Write' ? ['/project/generated-files'] : []);
+			assert.strictEqual(harness.output.value.includes('sf project deploy start'), answer === 'Write');
+			assert.deepStrictEqual(harness.calls.error, []);
+		}
+	});
+
+	test('overwriteDetail lists existing files with unsaved editor changes', () => {
+		const preview = previewOf(['exists', 'exists', 'new']);
+		const detail = overwriteDetail(preview, [preview.files[1].absolutePath, '/elsewhere.cls']);
+		assert.ok(detail.startsWith('1 new, 2 existing files in /project/force-app'));
+		assert.ok(detail.endsWith('would be overwritten:\nclasses/AccountsSelector1.cls'), detail);
+		assert.strictEqual(overwriteDetail(preview, []), '1 new, 2 existing files in /project/force-app');
+	});
+
+	test('newTrailingLines returns only what the second report adds', () => {
+		assert.deepStrictEqual(newTrailingLines('a\nb', 'a\nb\nc\nd'), ['c', 'd']);
+	});
+});
+
+interface FakeInputOptions extends Partial<InputApi> {
+	/** Input box answers keyed by input label. */
+	answers?: Record<string, string | (() => string | undefined)>;
+}
+
+function fakeInputApi(options: FakeInputOptions = {}): InputApi {
+	const { answers = {}, ...overrides } = options;
+	return {
+		pickOrg: async () => 'dev',
+		pickFile: async () => undefined,
+		pickOutputDirectory: async (picker) => picker.defaultValue,
+		showInputBox: async (box) => {
+			const key = Object.keys(answers).find((label) => box.prompt === label || box.prompt === `${label} (comma-separated)`);
+			const answer = key === undefined ? undefined : answers[key];
+			return typeof answer === 'function' ? answer() : answer;
+		},
+		showQuickPick: async (items) => items[0],
+		showBooleanPick: async () => [],
+		showWarningMessage: async () => undefined,
+		...overrides,
+	};
+}
+
+function newStore(): LastValueStore {
+	return new LastValueStore(new MemoryMemento());
+}
+
+function commandById(commands: readonly CommandDef[], id: string): CommandDef {
 	const command = commands.find((candidate) => candidate.id === id);
 	assert.ok(command, `missing command ${id}`);
 	return command;
 }
 
-async function withWorkspaceFolders(roots: readonly string[], task: () => Promise<void>): Promise<void> {
-	const descriptor = Object.getOwnPropertyDescriptor(vscode.workspace, 'workspaceFolders');
-	Object.defineProperty(vscode.workspace, 'workspaceFolders', {
-		configurable: true,
-		value: roots.map((root, index) => ({ uri: vscode.Uri.file(root), name: root, index })),
-	});
-	try {
-		await task();
-	} finally {
-		if (descriptor) {
-			Object.defineProperty(vscode.workspace, 'workspaceFolders', descriptor);
-		} else {
-			delete (vscode.workspace as { workspaceFolders?: readonly vscode.WorkspaceFolder[] }).workspaceFolders;
-		}
-	}
-}
-
-async function withOpenDialog(result: readonly vscode.Uri[] | undefined, task: () => Promise<void>): Promise<void> {
-	const original = vscode.window.showOpenDialog;
-	vscode.window.showOpenDialog = async () => result as vscode.Uri[] | undefined;
-	try {
-		await task();
-	} finally {
-		vscode.window.showOpenDialog = original;
-	}
-}
-
-async function withQuickPick(
-	handler: (items: readonly vscode.QuickPickItem[]) => vscode.QuickPickItem | undefined,
-	task: () => Promise<void>,
-): Promise<void> {
-	const original = vscode.window.showQuickPick;
-	(vscode.window as unknown as { showQuickPick: unknown }).showQuickPick = async (items: readonly vscode.QuickPickItem[]) => handler(items);
-	try {
-		await task();
-	} finally {
-		vscode.window.showQuickPick = original;
-	}
-}
-
-async function withWarningMessage(handler: (message: string) => Thenable<string | undefined>, task: () => Promise<void>): Promise<void> {
-	const original = vscode.window.showWarningMessage;
-	vscode.window.showWarningMessage = handler as typeof vscode.window.showWarningMessage;
-	try {
-		await task();
-	} finally {
-		vscode.window.showWarningMessage = original;
-	}
-}
-
-class MemoryMemento implements vscode.Memento {
-	private readonly values = new Map<string, unknown>();
-
-	public get<T>(key: string): T | undefined;
-	public get<T>(key: string, defaultValue: T): T;
-	public get<T>(key: string, defaultValue?: T): T | undefined {
-		return this.values.has(key) ? this.values.get(key) as T : defaultValue;
-	}
-
-	public keys(): readonly string[] {
-		return [...this.values.keys()];
-	}
-
-	public update(key: string, value: unknown): Thenable<void> {
-		this.values.set(key, value);
-		return Promise.resolve();
-	}
-}
-
-class MemoryOutputChannel implements vscode.OutputChannel {
-	public value = '';
-	public readonly name = 'Apx';
-
-	public append(value: string): void {
-		this.value += value;
-	}
-
-	public appendLine(value: string): void {
-		this.value += `${value}\n`;
-	}
-
-	public clear(): void {}
-	public show(): void {}
-	public hide(): void {}
-	public dispose(): void {}
-	public replace(value: string): void {
-		this.value = value;
-	}
-}
-
-function fakeChildProcess(stdout: string, code = 0): any {
-	const child = new EventEmitter() as any;
-	child.stdout = new EventEmitter();
-	child.stderr = new EventEmitter();
-	child.kill = () => true;
-	setImmediate(() => {
-		child.stdout.emit('data', stdout);
-		child.emit('close', code);
-	});
-	return child;
-}
-
-function fakeCancellableChildProcess(): any {
-	const child = new EventEmitter() as any;
-	child.stdout = new EventEmitter();
-	child.stderr = new EventEmitter();
-	child.kill = () => {
-		setImmediate(() => child.emit('close', null));
-		return true;
+function previewOf(statuses: readonly ('new' | 'exists')[]): GenerationPreview {
+	return {
+		commandId: 'generate-selector',
+		baseDir: '/project/force-app',
+		files: statuses.map((status, index) => ({
+			status,
+			relativePath: `classes/AccountsSelector${index}.cls`,
+			absolutePath: `/project/force-app/classes/AccountsSelector${index}.cls`,
+			content: '',
+			artifactId: 'selectorClass',
+		})),
 	};
-	return child;
+}
+
+interface Answers {
+	info?: string;
+	warning?: string;
+}
+
+function uiHarness(core: ApxCore, answers: Answers) {
+	const calls = { info: [] as unknown[][], warning: [] as unknown[][], error: [] as unknown[][], status: [] as string[] };
+	const orgCalls: string[] = [];
+	const output = new MemoryOutputChannel();
+	const isModal = (args: unknown[]): boolean => (args[1] as vscode.MessageOptions | undefined)?.modal === true;
+	const orgs: OrgService = {
+		listOrgs: async () => [{ label: 'dev', value: 'dev' }],
+		connect: async (org) => { orgCalls.push(`connect:${org}`); return {} as never; },
+		resolveUsername: async () => 'dev@example.com',
+		invalidate: async (org) => { orgCalls.push(`invalidate:${org}`); },
+	};
+	const token = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => undefined }) };
+	const deps: RunnerDeps = {
+		core: async () => core,
+		orgs,
+		output,
+		withProgress: (async (_options: unknown, task: (progress: unknown, token: unknown) => unknown) => task({ report: () => undefined }, token)) as unknown as RunnerDeps['withProgress'],
+		showInformationMessage: (async (...args: unknown[]) => { calls.info.push(args); return isModal(args) ? answers.info : undefined; }) as unknown as RunnerDeps['showInformationMessage'],
+		showWarningMessage: (async (...args: unknown[]) => { calls.warning.push(args); return isModal(args) ? answers.warning : undefined; }) as unknown as RunnerDeps['showWarningMessage'],
+		showErrorMessage: (async (...args: unknown[]) => { calls.error.push(args); return undefined; }) as unknown as RunnerDeps['showErrorMessage'],
+		setStatusBarMessage: (text) => calls.status.push(text),
+		executeCommand: (async () => undefined) as unknown as RunnerDeps['executeCommand'],
+		dirtyDocuments: () => [],
+	};
+	return { calls, orgCalls, output, runner: createCommandRunner(deps) };
+}
+
+function generationHarness(real: ApxCore, preview: GenerationPreview, answers: Answers, onApply?: () => Promise<void>, onPlan?: () => Promise<void>) {
+	const applied: { preview: GenerationPreview; overwrite: string }[] = [];
+	const core = {
+		...real,
+		renderGenerationResult: () => ['APPLIED'],
+		useCases: {
+			...real.useCases,
+			'generate-selector': {
+				...real.useCases['generate-selector'],
+				plan: async () => { await onPlan?.(); return preview; },
+				apply: async (_conn: unknown, plan: GenerationPreview, ctx: { overwrite: string }) => {
+					await onApply?.();
+					applied.push({ preview: plan, overwrite: ctx.overwrite });
+					return {};
+				},
+			},
+		},
+	} as unknown as ApxCore;
+	const ui = uiHarness(core, answers);
+	const command = commandById(buildCommands(real), 'apx.generate.selector');
+	const inputs: GatheredInputs = { org: 'dev', options: { outputPath: 'force-app', sobject: 'Account', flavor: 'fflib' }, display: [] };
+	return { ...ui, applied, run: () => ui.runner.run(command, inputs, '/project') };
+}
+
+function deadHarness(real: ApxCore, answer: string | undefined) {
+	const written: string[] = [];
+	const core = {
+		...real,
+		renderDeadCodeReport: (_result: unknown, options: { manifestDir?: string }) => options.manifestDir
+			? `DEAD REPORT\nManifest written to ${options.manifestDir}\nsf project deploy start`
+			: 'DEAD REPORT',
+		resolveOutputBase: async () => '/project/generated-files',
+		writeDeadCodeManifest: async (_result: unknown, outputBase: string) => {
+			written.push(outputBase);
+			return { manifestDir: join(outputBase, 'dead-code'), manifestFiles: ['package.xml'] };
+		},
+		useCases: {
+			...real.useCases,
+			dead: { ...real.useCases.dead, run: async () => ({ dead: [], manifest: { members: [] } }) },
+		},
+	} as unknown as ApxCore;
+	const ui = uiHarness(core, { warning: answer });
+	const command = commandById(buildCommands(real), 'apx.dead');
+	const inputs: GatheredInputs = {
+		org: 'dev',
+		options: { outputPath: 'generated-files', classes: true, destructiveManifest: true, deadOnly: false, includeSuppressed: false },
+		display: [],
+	};
+	return { ...ui, written, run: () => ui.runner.run(command, inputs, '/project') };
+}
+
+function sourceFiles(directory: string): string[] {
+	return readdirSync(directory).flatMap((name) => {
+		const file = join(directory, name);
+		return statSync(file).isDirectory() ? sourceFiles(file) : file.endsWith('.ts') ? [file] : [];
+	});
 }

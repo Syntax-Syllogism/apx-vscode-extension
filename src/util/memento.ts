@@ -3,19 +3,19 @@ import type * as vscode from 'vscode';
 export class LastValueStore {
 	public constructor(private readonly memento: vscode.Memento) {}
 
-	public get(commandId: string, flagName: string): string | undefined {
-		return this.memento.get<string>(this.key(commandId, flagName));
+	public get(descriptorId: string, optionKey: string): string | undefined {
+		return this.memento.get<string>(this.key(descriptorId, optionKey));
 	}
 
-	public async set(commandId: string, flagName: string, value: string | undefined): Promise<void> {
+	public async set(descriptorId: string, optionKey: string, value: string | undefined): Promise<void> {
 		if (!value) {
 			return;
 		}
 
-		await this.memento.update(this.key(commandId, flagName), value);
+		await this.memento.update(this.key(descriptorId, optionKey), value);
 	}
 
-	private key(commandId: string, flagName: string): string {
-		return `apx:${commandId}:${flagName}`;
+	private key(descriptorId: string, optionKey: string): string {
+		return `apx.last.${descriptorId}.${optionKey}`;
 	}
 }

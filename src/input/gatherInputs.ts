@@ -1,37 +1,40 @@
 import * as vscode from 'vscode';
-import { pickFile, pickFolder } from './filePicker';
-import { pickOrg } from './orgPicker';
-import { pickOutputDirectory, type PickOutputDirectoryOptions } from './outputDirPicker';
-import type { CommandDef, FlagDef } from '../registry/types';
+import type { OrgService } from '../core/orgService';
+import type { CommandDef, InputDef } from '../registry/types';
 import { LastValueStore } from '../util/memento';
+import { pickFile } from './filePicker';
+import { NO_ORG, pickOrg } from './orgPicker';
+import { pickOutputDirectory, type PickOutputDirectoryOptions } from './outputDirPicker';
 
 export interface GatheredInputs {
-	args: string[];
-	displayArgs: string[];
+	/** Alias or username; undefined when the command needs no org or "(none)" was chosen. */
+	org?: string;
+	options: Record<string, unknown>;
+	display: string[];
 }
 
 export interface InputApi {
-	pickOrg(lastValue?: string): Promise<string | undefined>;
+	/** Resolves to an org value, {@link NO_ORG} for "(none)", or undefined on cancel. */
+	pickOrg(lastValue: string | undefined, optional: boolean): Promise<string | undefined>;
 	pickFile(label: string, defaultDirectory?: string): Promise<string | undefined>;
-	pickFolder(label: string, defaultDirectory?: string): Promise<string | undefined>;
 	pickOutputDirectory(options: PickOutputDirectoryOptions): Promise<string | undefined>;
 	showInputBox(options: vscode.InputBoxOptions): Thenable<string | undefined>;
 	showQuickPick<T extends vscode.QuickPickItem>(items: readonly T[], options?: vscode.QuickPickOptions): Thenable<T | undefined>;
 	showBooleanPick(items: readonly BooleanPick[], placeHolder: string): Thenable<readonly BooleanPick[] | undefined>;
-	showWarningMessage(message: string): Thenable<string | undefined>;
+	showWarningMessage(message: string): Thenable<unknown>;
 }
-
-export type { PickOutputDirectoryOptions };
 
 export interface BooleanPick extends vscode.QuickPickItem {
-	flag: FlagDef;
+	input: InputDef;
 }
 
-export function createVsCodeInputApi(): InputApi {
+/** Validation re-prompts per command run before giving up, so a bad schema cannot loop forever. */
+const MAX_VALIDATION_ATTEMPTS = 5;
+
+export function createVsCodeInputApi(orgs: OrgService): InputApi {
 	return {
-		pickOrg,
+		pickOrg: (lastValue, optional) => pickOrg(orgs, lastValue, optional),
 		pickFile,
-		pickFolder,
 		pickOutputDirectory,
 		showInputBox: (options) => vscode.window.showInputBox(options),
 		showQuickPick: (items, options) => vscode.window.showQuickPick(items, options),
@@ -40,277 +43,132 @@ export function createVsCodeInputApi(): InputApi {
 	};
 }
 
-export async function gatherInputs(
-	command: CommandDef,
-	store: LastValueStore,
-	inputApi: InputApi = createVsCodeInputApi(),
-): Promise<GatheredInputs | undefined> {
-	const flags = [...command.flags];
-	const gathered = await gatherNamedFlags(command, flags, store, inputApi);
-	if (!gathered) {
-		return undefined;
-	}
-
-	const pickedBooleanNames = await gatherBooleanFlags(gathered, flags, inputApi);
-	if (!pickedBooleanNames) {
-		return undefined;
-	}
-
-	if (!await validateRequiredBooleanSelection(command, pickedBooleanNames, inputApi)) {
-		return undefined;
-	}
-
-	return gathered;
-}
-
-async function gatherNamedFlags(
-	command: CommandDef,
-	flags: readonly FlagDef[],
-	store: LastValueStore,
-	inputApi: InputApi,
-): Promise<GatheredInputs | undefined> {
-	const gathered: GatheredInputs = { args: [], displayArgs: [] };
-	const exclusiveGroups = groupExclusiveFlags(flags);
-	const handledExclusiveGroups = new Set<string>();
-	const dependentFlags = flags.filter((flag) => flag.dependsOnFlag);
-	for (const flag of flags) {
-		if (flag.dependsOnFlag) {
-			// Gathered as a follow-up once its target flag is selected, not here.
-			continue;
-		}
-
-		if (flag.exclusiveGroup && handledExclusiveGroups.has(flag.exclusiveGroup)) {
-			continue;
-		}
-
-		if (flag.exclusiveGroup) {
-			handledExclusiveGroups.add(flag.exclusiveGroup);
-			const groupFlags = exclusiveGroups.get(flag.exclusiveGroup) ?? [];
-			const groupGathered = await gatherExclusiveGroup(command, flag.exclusiveGroup, groupFlags, dependentFlags, store, inputApi);
-			if (!groupGathered) {
-				return undefined;
-			}
-
-			appendGatheredInputs(gathered, groupGathered);
-			continue;
-		}
-
-		if (flag.kind === 'boolean') {
-			continue;
-		}
-
-		const flagGathered = await gatherFlag(command, flag, store, inputApi);
-		if (!flagGathered && flag.required) {
+export async function gatherInputs(command: CommandDef, store: LastValueStore, api: InputApi, projectRoot?: string): Promise<GatheredInputs | undefined> {
+	const gathered: GatheredInputs = { options: {}, display: [] };
+	const groups = new Set<string>();
+	for (const input of command.inputs) {
+		if (input.kind === 'boolean' || input.dependsOn) { continue; }
+		if (input.exclusiveGroup) {
+			if (groups.has(input.exclusiveGroup)) { continue; }
+			groups.add(input.exclusiveGroup);
+			const choices = command.inputs.filter((candidate) => candidate.exclusiveGroup === input.exclusiveGroup);
+			const selected = await api.showQuickPick(choices.map((candidate) => ({ label: candidate.label, input: candidate })), { placeHolder: `Choose ${input.exclusiveGroup}` });
+			if (!selected || !await gatherOne(command, selected.input, gathered, store, api, projectRoot, true)) { return undefined; }
+		} else if (!await gatherOne(command, input, gathered, store, api, projectRoot, Boolean(input.required))) {
 			return undefined;
 		}
-
-		if (flagGathered) {
-			appendGatheredInputs(gathered, flagGathered);
-		}
 	}
-
-	return gathered;
+	if (!await gatherBooleans(command, command.inputs.filter((input) => input.kind === 'boolean' && !input.dependsOn), gathered, store, api)) { return undefined; }
+	return validate(command, gathered, store, api, projectRoot);
 }
 
-async function gatherBooleanFlags(
-	gathered: GatheredInputs,
-	flags: readonly FlagDef[],
-	inputApi: InputApi,
-): Promise<ReadonlySet<string> | undefined> {
-	const pickedBooleanNames = new Set<string>();
-	const booleanFlags = flags.filter((flag) => flag.kind === 'boolean' && !flag.exclusiveGroup);
-	if (booleanFlags.length === 0) {
-		return pickedBooleanNames;
+/**
+ * Runs the descriptor's zod schema over the gathered options. On failure the first
+ * issue is shown and the offending field is asked for again.
+ */
+async function validate(command: CommandDef, gathered: GatheredInputs, store: LastValueStore, api: InputApi, projectRoot?: string): Promise<GatheredInputs | undefined> {
+	for (let attempt = 0; attempt < MAX_VALIDATION_ATTEMPTS; attempt++) {
+		const parsed = command.optionsSchema.safeParse(gathered.options);
+		if (parsed.success) { return gathered; }
+		const issue = parsed.error.issues[0];
+		const key = issue?.path[0];
+		const input = command.inputs.find((candidate) => candidate.key === key && candidate.kind !== 'boolean' && candidate.kind !== 'org');
+		await api.showWarningMessage(input ? `${input.label}: ${issue.message}` : issue?.message ?? 'Invalid options');
+		if (!input) { return undefined; }
+		delete gathered.options[input.key];
+		gathered.display = gathered.display.filter((line) => !line.startsWith(`${input.label}: `));
+		if (!await gatherOne(command, input, gathered, store, api, projectRoot, true)) { return undefined; }
 	}
-
-	const picked = await inputApi.showBooleanPick(booleanPickItems(booleanFlags), 'Select options to enable');
-	if (!picked) {
-		return undefined;
-	}
-
-	for (const item of picked) {
-		pickedBooleanNames.add(item.flag.name);
-		appendGatheredInputs(gathered, {
-			args: [`--${item.flag.name}`],
-			displayArgs: [`--${item.flag.name}`],
-		});
-	}
-
-	return pickedBooleanNames;
+	return undefined;
 }
 
-async function validateRequiredBooleanSelection(
-	command: CommandDef,
-	pickedBooleanNames: ReadonlySet<string>,
-	inputApi: InputApi,
-): Promise<boolean> {
-	if (!command.requireOneOf || command.requireOneOf.some((flagName) => pickedBooleanNames.has(flagName))) {
-		return true;
+async function gatherBooleans(command: CommandDef, inputs: readonly InputDef[], gathered: GatheredInputs, store: LastValueStore, api: InputApi): Promise<boolean> {
+	if (!inputs.length) { return true; }
+	const items = inputs.map((input) => ({
+		label: input.label,
+		description: input.summary === input.label ? undefined : input.summary,
+		picked: (store.get(command.coreId, input.key) ?? String(input.default ?? false)) === 'true',
+		input,
+	}));
+	const picked = await api.showBooleanPick(items, 'Select options to enable');
+	if (!picked) { return false; }
+	const enabled = new Set(picked.map((item) => item.input.key));
+	for (const input of inputs) {
+		const value = enabled.has(input.key);
+		gathered.options[input.key] = value;
+		await store.set(command.coreId, input.key, String(value));
+		if (value) { gathered.display.push(`${input.label}: yes`); }
 	}
-
-	await inputApi.showWarningMessage(`Select at least one of: ${command.requireOneOf.map((flagName) => `--${flagName}`).join(', ')}`);
-	return false;
-}
-
-async function gatherExclusiveGroup(
-	command: CommandDef,
-	groupName: string,
-	groupFlags: readonly FlagDef[],
-	dependentFlags: readonly FlagDef[],
-	store: LastValueStore,
-	inputApi: InputApi,
-): Promise<GatheredInputs | undefined> {
-	const presentation = exclusiveGroupPresentation(groupName);
-	const picked = await inputApi.showQuickPick(
-		groupFlags.map((flag) => ({ label: presentation.labels.get(flag.name) ?? `--${flag.name}`, flag })),
-		{ placeHolder: presentation.prompt },
-	);
-	if (!picked) {
-		return undefined;
-	}
-
-	const gathered: GatheredInputs = { args: [], displayArgs: [] };
-	if (picked.flag.kind === 'boolean') {
-		appendGatheredInputs(gathered, {
-			args: [`--${picked.flag.name}`],
-			displayArgs: [`--${picked.flag.name}`],
-		});
-	} else {
-		const pickedGathered = await gatherFlag(command, picked.flag, store, inputApi);
-		if (!pickedGathered) {
-			return undefined;
-		}
-
-		appendGatheredInputs(gathered, pickedGathered);
-	}
-
-	if (!await gatherDependentFlags(command, picked.flag.name, dependentFlags, gathered, store, inputApi)) {
-		return undefined;
-	}
-
-	return gathered;
-}
-
-async function gatherDependentFlags(
-	command: CommandDef,
-	selectedFlagName: string,
-	dependentFlags: readonly FlagDef[],
-	gathered: GatheredInputs,
-	store: LastValueStore,
-	inputApi: InputApi,
-): Promise<boolean> {
-	for (const dependent of dependentFlags) {
-		if (dependent.dependsOnFlag !== selectedFlagName) {
-			continue;
-		}
-
-		const dependentGathered = await gatherFlag(command, dependent, store, inputApi);
-		if (!dependentGathered && dependent.required) {
-			return false;
-		}
-
-		if (dependentGathered) {
-			appendGatheredInputs(gathered, dependentGathered);
+	for (const key of enabled) {
+		const dependents = command.inputs.filter((candidate) => candidate.dependsOn === key);
+		const booleans = dependents.filter((candidate) => candidate.kind === 'boolean');
+		if (!await gatherBooleans(command, booleans, gathered, store, api)) { return false; }
+		for (const dependent of dependents.filter((candidate) => candidate.kind !== 'boolean')) {
+			if (!await gatherOne(command, dependent, gathered, store, api, undefined, Boolean(dependent.required))) { return false; }
 		}
 	}
-
 	return true;
 }
 
-async function gatherFlag(
-	command: CommandDef,
-	flag: FlagDef,
-	store: LastValueStore,
-	inputApi: InputApi,
-): Promise<GatheredInputs | undefined> {
-	const lastValue = getLastValue(command.id, flag.name, store);
+/** Returns false only when gathering should stop (a required value was cancelled). */
+async function gatherOne(command: CommandDef, input: InputDef, gathered: GatheredInputs, store: LastValueStore, api: InputApi, projectRoot: string | undefined, required: boolean): Promise<boolean> {
+	const lastValue = store.get(command.coreId, input.key);
 	let value: string | undefined;
-
-	if (flag.kind === 'org') {
-		value = await inputApi.pickOrg(lastValue);
-	} else if (flag.kind === 'outputDir') {
-		value = await inputApi.pickOutputDirectory({
-			command,
-			flag,
-			label: flag.summary ?? `Select --${flag.name}`,
-			defaultValue: flag.default,
-			lastValue,
-		});
-	} else if (flag.kind === 'enum') {
-		const picked = await inputApi.showQuickPick(
-			(flag.options ?? []).map((option) => ({ label: option })),
-			{ placeHolder: flag.summary ?? `Select --${flag.name}` },
-		);
-		value = picked?.label;
-	} else {
-		value = await inputApi.showInputBox({
-			ignoreFocusOut: true,
-			placeHolder: flag.placeholder,
-			prompt: flag.summary ?? `Enter --${flag.name}`,
-			value: lastValue,
-		});
-	}
-
-	if (!value) {
-		return undefined;
-	}
-
-	await store.set(command.id, flag.name, value);
-	return {
-		args: [`--${flag.name}`, value],
-		displayArgs: [`--${flag.name}`, quoteDisplayArg(value)],
-	};
-}
-
-function quoteDisplayArg(value: string): string {
-	return /\s/.test(value) ? JSON.stringify(value) : value;
-}
-
-function appendGatheredInputs(target: GatheredInputs, source: GatheredInputs): void {
-	target.args.push(...source.args);
-	target.displayArgs.push(...source.displayArgs);
-}
-
-function booleanPickItems(flags: readonly FlagDef[]): BooleanPick[] {
-	return flags.map((flag) => ({ label: `--${flag.name}`, description: flag.summary, flag }));
-}
-
-function getLastValue(commandId: string, flagName: string, store: LastValueStore): string | undefined {
-	if (flagName === 'target-org') {
-		return store.get(commandId, flagName) ?? vscode.workspace.getConfiguration('apx').get<string>('defaultTargetOrg') ?? undefined;
-	}
-
-	return store.get(commandId, flagName);
-}
-
-function groupExclusiveFlags(flags: readonly FlagDef[]): Map<string, FlagDef[]> {
-	const groups = new Map<string, FlagDef[]>();
-	for (const flag of flags) {
-		if (!flag.exclusiveGroup) {
-			continue;
+	switch (input.kind) {
+		case 'org': {
+			const preferred = lastValue ?? (vscode.workspace.getConfiguration('apx').get<string>('defaultTargetOrg') || undefined);
+			const org = await api.pickOrg(preferred, !required);
+			if (org === undefined) { return false; }
+			if (org === NO_ORG) {
+				gathered.display.push(`${input.label}: (none)`);
+				return true;
+			}
+			await store.set(command.coreId, input.key, org);
+			gathered.org = org;
+			gathered.display.push(`${input.label}: ${org}`);
+			return true;
 		}
-
-		const group = groups.get(flag.exclusiveGroup) ?? [];
-		group.push(flag);
-		groups.set(flag.exclusiveGroup, group);
+		case 'folder':
+			value = await api.pickOutputDirectory({
+				label: input.summary ?? input.label,
+				defaultValue: typeof input.default === 'string' ? input.default : undefined,
+				lastValue,
+				workspaceRoot: projectRoot,
+			});
+			break;
+		case 'file':
+			value = await api.pickFile(input.summary ?? input.label, projectRoot);
+			break;
+		case 'enum': {
+			const preferred = lastValue ?? input.default;
+			const choices = [...(input.options ?? [])];
+			if (typeof preferred === 'string' && choices.includes(preferred)) {
+				choices.splice(choices.indexOf(preferred), 1);
+				choices.unshift(preferred);
+			}
+			const items = choices.map((choice) => ({ label: choice, description: choice === preferred ? 'default' : undefined }));
+			value = (await api.showQuickPick(items, { placeHolder: input.summary ?? input.label, ignoreFocusOut: true }))?.label;
+			break;
+		}
+		default:
+			value = await api.showInputBox({
+				ignoreFocusOut: true,
+				prompt: input.kind === 'multiString' ? `${input.summary ?? input.label} (comma-separated)` : input.summary ?? input.label,
+				placeHolder: input.placeholder ?? (typeof input.default === 'string' && input.default ? input.default : required ? undefined : 'Optional'),
+				value: lastValue,
+			});
 	}
-
-	return groups;
+	if (value === undefined) { return !required; }
+	if (!value.trim()) { return !required; }
+	await store.set(command.coreId, input.key, value);
+	gathered.options[input.key] = input.kind === 'multiString' ? splitList(value) : value;
+	gathered.display.push(`${input.label}: ${value}`);
+	for (const dependent of command.inputs.filter((candidate) => candidate.dependsOn === input.key && candidate.kind !== 'boolean')) {
+		if (!await gatherOne(command, dependent, gathered, store, api, projectRoot, Boolean(dependent.required))) { return false; }
+	}
+	return true;
 }
 
-function exclusiveGroupPresentation(groupName: string): { prompt: string; labels: ReadonlyMap<string, string> } {
-	if (groupName === 'flavor') {
-		return {
-			prompt: 'Choose framework flavor',
-			labels: new Map([
-				['at4dx', 'AT4DX'],
-				['fflib', 'fflib'],
-			]),
-		};
-	}
-
-	return {
-		prompt: `Choose ${groupName}`,
-		labels: new Map(),
-	};
+function splitList(value: string): string[] {
+	return value.split(',').map((item) => item.trim()).filter(Boolean);
 }

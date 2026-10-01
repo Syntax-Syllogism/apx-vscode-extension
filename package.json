@@ -1,8 +1,8 @@
 {
   "name": "apx-ext",
   "displayName": "Apx",
-  "description": "Guided VS Code workflows for the @syntax-syllogism/apx Salesforce CLI plugin.",
-  "version": "0.1.0",
+  "description": "Guided Apex generation and dead-code analysis powered by apx-core.",
+  "version": "0.2.0",
   "publisher": "syntax-syllogism",
   "author": "Jake Richter <j.p.richter@gmail.com>",
   "license": "MIT",
@@ -23,7 +23,7 @@
     "apex enterprise patterns"
   ],
   "engines": {
-    "vscode": "^1.88.0"
+    "vscode": "^1.125.0"
   },
   "categories": [
     "Other"
@@ -71,6 +71,10 @@
       {
         "command": "apx.generate.criteria",
         "title": "SF Apx: Generate Criteria"
+      },
+      {
+        "command": "apx.dead",
+        "title": "SF Apx: Find Dead Code"
       }
     ],
     "viewsContainers": {
@@ -118,16 +122,15 @@
     "lint:md": "markdownlint-cli2 \"**/*.md\"",
     "lint:md:fix": "markdownlint-cli2 --fix \"**/*.md\"",
     "test": "vscode-test",
-    "gen:commands": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/gen-commands.ts"
+    "sync:contributes": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/sync-contributes.mjs"
   },
   "lint-staged": {
     "*.md": "markdownlint-cli2 --fix"
   },
   "devDependencies": {
-    "@types/cross-spawn": "^6.0.6",
     "@types/mocha": "^10.0.10",
     "@types/node": "26.x",
-    "@types/vscode": "1.88.0",
+    "@types/vscode": "1.125.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.0.0",
     "@vscode/vsce": "^3.9.2",
@@ -145,6 +148,8 @@
     "serialize-javascript": "^7.0.6"
   },
   "dependencies": {
-    "cross-spawn": "^7.0.6"
+    "@salesforce/core": "^8",
+    "@syntax-syllogism/apx-core": "0.3.1",
+    "zod": "^4"
   }
 }

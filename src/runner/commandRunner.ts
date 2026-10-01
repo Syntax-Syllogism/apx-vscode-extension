@@ -1,253 +1,171 @@
-import type { ChildProcessWithoutNullStreams } from 'child_process';
 import * as path from 'path';
-import { spawnSf } from './sfProcess';
 import * as vscode from 'vscode';
-import type { CommandDef } from '../registry/types';
+import type { Connection } from '@salesforce/core';
+import type { DeadUseCaseResult, GenerationOutcome, GenerationPreview, ProgressEvent } from '@syntax-syllogism/apx-core' with { 'resolution-mode': 'import' };
+import type { ApxCore } from '../core/load';
+import type { OrgService } from '../core/orgService';
 import type { GatheredInputs } from '../input/gatherInputs';
-import { stripAnsi } from './ansi';
-
-export interface CommandRunner {
-	run(command: CommandDef, inputs: GatheredInputs): Promise<void>;
-}
+import type { CommandDef } from '../registry/types';
+import { appendLines, newTrailingLines, overwriteDetail } from './render';
 
 export interface RunnerDeps {
+	core: () => Promise<ApxCore>;
+	orgs: OrgService;
 	output: vscode.OutputChannel;
-	spawnProcess: SpawnProcess;
 	withProgress: typeof vscode.window.withProgress;
 	showInformationMessage: typeof vscode.window.showInformationMessage;
 	showWarningMessage: typeof vscode.window.showWarningMessage;
 	showErrorMessage: typeof vscode.window.showErrorMessage;
+	setStatusBarMessage?: (text: string, hideAfterTimeout: number) => unknown;
 	executeCommand?: typeof vscode.commands.executeCommand;
-	workspaceFolder?: string;
+	/** Absolute paths of open editors with unsaved changes. */
+	dirtyDocuments?: () => readonly string[];
 }
 
-export type SpawnProcess = (file: string, args: readonly string[], options: { cwd?: string; env: NodeJS.ProcessEnv }) => ChildProcessWithoutNullStreams;
-
-interface RunResult {
-	code: number | null;
-	stdout: string;
-	stderr: string;
-	cancelled: boolean;
+export interface CommandRunner {
+	run(command: CommandDef, inputs: GatheredInputs, projectRoot: string): Promise<void>;
 }
 
-interface SfCommandResult {
-	cancelled: boolean;
-	succeeded: boolean;
-	message?: string;
-}
-
-interface ExecutionStrategy {
-	run(command: CommandDef, inputs: GatheredInputs): Promise<void>;
-}
+type Context = { projectRoot: string; signal: AbortSignal; onProgress: (event: ProgressEvent) => void };
+type Schema = { safeParse: (options: unknown) => { success: boolean; data?: unknown; error?: { issues: unknown[] } } };
+type ReadCase = { kind: 'read'; descriptor: { optionsSchema: Schema }; run: (conn: Connection | undefined, options: never, ctx: Context) => Promise<unknown> };
+type WriteCase = {
+	kind: 'write';
+	descriptor: { optionsSchema: Schema };
+	plan: (conn: Connection | undefined, options: never, ctx: Context) => Promise<GenerationPreview>;
+	apply: (conn: Connection | undefined, plan: GenerationPreview, ctx: Context & { overwrite: 'overwrite' | 'skip' }) => Promise<GenerationOutcome>;
+};
 
 export function createCommandRunner(deps: RunnerDeps): CommandRunner {
-	const adapter = new SfCliAdapter(deps);
 	return {
-		async run(command, inputs): Promise<void> {
-			return strategyFor(deps, adapter).run(command, inputs);
+		async run(command, inputs, projectRoot): Promise<void> {
+			const core = await deps.core();
+			const useCase = core.useCases[command.coreId as keyof ApxCore['useCases']] as unknown as ReadCase | WriteCase;
+			const parsed = useCase.descriptor.optionsSchema.safeParse(inputs.options);
+			if (!parsed.success) {
+				deps.output.appendLine(`Invalid options: ${JSON.stringify(parsed.error?.issues, null, 2)}`);
+				deps.output.show(true);
+				deps.showErrorMessage('Invalid options');
+				return;
+			}
+			const options = parsed.data as Record<string, unknown>;
+			deps.output.show(true);
+			deps.output.appendLine(`\n${command.title}\n${inputs.display.join('\n')}`);
+			try {
+				let conn = inputs.org ? await deps.orgs.connect(inputs.org) : undefined;
+				const execute = async <T>(title: string, action: (connection: Connection | undefined, ctx: Context) => Promise<T>): Promise<T> => {
+					const perform = async (): Promise<T> => deps.withProgress(
+						{ location: vscode.ProgressLocation.Notification, title, cancellable: true },
+						async (progress, token) => {
+							const controller = new AbortController();
+							const subscription = token.onCancellationRequested(() => {
+								controller.abort();
+								// Use cases only check the signal between phases and queries.
+								progress.report({ message: 'Cancelling after current step…' });
+							});
+							if (token.isCancellationRequested) { controller.abort(); }
+							const onProgress = (event: ProgressEvent): void => {
+								if (controller.signal.aborted) { return; }
+								const counts = event.total ? ` (${event.done ?? 0}/${event.total})` : '';
+								progress.report({ message: `${event.message ?? event.phase}${counts}` });
+							};
+							try { return await action(conn, { projectRoot, signal: controller.signal, onProgress }); }
+							finally { subscription.dispose(); }
+						},
+					);
+					try { return await perform(); }
+					catch (error) {
+						if (!inputs.org || !isAuthError(error)) { throw error; }
+						await deps.orgs.invalidate(inputs.org);
+						conn = await deps.orgs.connect(inputs.org);
+						return perform();
+					}
+				};
+				if (useCase.kind === 'write') {
+					await runGeneration(deps, core, command, useCase, options, execute);
+				} else {
+					await runRead(deps, core, command, useCase, options, inputs, projectRoot, execute);
+				}
+			} catch (error) {
+				reportError(deps, core, command, error);
+			}
 		},
 	};
 }
 
-export function buildCliArgs(command: CommandDef, inputArgs: readonly string[]): string[] {
-	return [...command.cliId.split(' '), ...inputArgs, ...internalFlags(command)];
-}
+type Execute = <T>(title: string, action: (connection: Connection | undefined, ctx: Context) => Promise<T>) => Promise<T>;
 
-export function buildDisplayArgs(command: CommandDef, displayInputArgs: readonly string[]): string[] {
-	return [...command.cliId.split(' '), ...displayInputArgs];
-}
-
-function strategyFor(deps: RunnerDeps, adapter: SfCliAdapter): ExecutionStrategy {
-	return new StandardCommandStrategy(deps, adapter);
-}
-
-class StandardCommandStrategy implements ExecutionStrategy {
-	public constructor(
-		private readonly deps: RunnerDeps,
-		private readonly adapter: SfCliAdapter,
-	) {}
-
-	public async run(command: CommandDef, inputs: GatheredInputs): Promise<void> {
-		const args = buildCliArgs(command, inputs.args);
-		if (!await confirmRun(this.deps, command, inputs)) {
-			return;
-		}
-
-		await runAndReport(this.deps, this.adapter, command, args);
-	}
-}
-
-class SfCliAdapter {
-	public constructor(private readonly deps: RunnerDeps) {}
-
-	public async run(command: CommandDef, args: readonly string[], title: string): Promise<SfCommandResult> {
-		this.deps.output.show(true);
-		this.deps.output.appendLine(`$ sf ${args.join(' ')}`);
-		const result = await this.spawnWithProgress(args, title);
-		if (result.cancelled) {
-			return { cancelled: true, succeeded: false };
-		}
-
-		const payload = this.parseJsonEnvelope(result.stdout) ?? this.parseJsonEnvelope(result.stderr);
-		return {
-			cancelled: false,
-			succeeded: payload && typeof payload.status === 'number' ? payload.status === 0 : result.code === 0,
-			message: successMessage(command, payload),
-		};
-	}
-
-	private spawnWithProgress(args: readonly string[], title: string): Promise<RunResult> {
-		return Promise.resolve(this.deps.withProgress(
-			{ location: vscode.ProgressLocation.Notification, title, cancellable: true },
-			(_progress, token) => this.runProcess(args, token),
-		));
-	}
-
-	private runProcess(args: readonly string[], token: vscode.CancellationToken): Promise<RunResult> {
-		return new Promise((resolve) => {
-			const child = this.deps.spawnProcess('sf', args, {
-				cwd: this.deps.workspaceFolder,
-				env: process.env,
-			});
-			let stdout = '';
-			let stderr = '';
-			let cancelled = false;
-
-			const cancel = token.onCancellationRequested(() => {
-				cancelled = true;
-				child.kill();
-			});
-
-			child.stdout.on('data', (chunk: Buffer | string) => {
-				const text = stripAnsi(String(chunk));
-				stdout += text;
-				this.deps.output.append(text);
-			});
-			child.stderr.on('data', (chunk: Buffer | string) => {
-				const text = stripAnsi(String(chunk));
-				stderr += text;
-				this.deps.output.append(text);
-			});
-			child.on('close', (code) => {
-				cancel.dispose();
-				resolve({ code, stdout, stderr, cancelled });
-			});
-		});
-	}
-
-	private parseJsonEnvelope(value: string): SfJsonEnvelope | undefined {
-		const trimmed = value.trim();
-		if (!looksLikeJsonEnvelope(trimmed)) {
-			return undefined;
-		}
-
-		try {
-			return JSON.parse(trimmed) as SfJsonEnvelope;
-		} catch (error) {
-			this.deps.output.appendLine(`[debug] Unable to parse Salesforce CLI JSON envelope: ${error instanceof Error ? error.message : String(error)}`);
-			return undefined;
-		}
-	}
-}
-
-interface SfJsonEnvelope {
-	status?: number;
-	result?: unknown;
-	message?: string;
-}
-
-async function runAndReport(deps: RunnerDeps, adapter: SfCliAdapter, command: CommandDef, args: readonly string[]): Promise<void> {
-	const result = await adapter.run(command, args, `Running ${command.title}`);
-	if (result.cancelled) {
-		return;
-	}
-
-	if (result.succeeded) {
-		await reportSuccess(deps, command, inputsFromArgs(command, args), result);
-		return;
-	}
-
-	deps.showErrorMessage(`${command.title} failed. See the Apx output channel.`);
+async function runGeneration(deps: RunnerDeps, core: ApxCore, command: CommandDef, useCase: WriteCase, options: Record<string, unknown>, execute: Execute): Promise<void> {
+	const preview = await execute(`Planning ${command.title}`, (connection, ctx) => useCase.plan(connection, options as never, ctx));
+	deps.output.appendLine('');
+	appendLines(deps.output, core.renderGenerationPlan(preview));
 	deps.output.show(true);
-}
-
-async function confirmRun(deps: RunnerDeps, command: CommandDef, inputs: GatheredInputs): Promise<boolean> {
-	if (!requiresRunConfirmation(command)) {
-		return true;
-	}
-
-	const displayCommand = `sf ${buildDisplayArgs(command, inputs.displayArgs).join(' ')}`;
-	const runChoice = await deps.showInformationMessage(`Run ${displayCommand}?`, { modal: true }, 'Run');
-	return runChoice === 'Run';
-}
-
-function looksLikeJsonEnvelope(value: string): boolean {
-	return value.startsWith('{');
-}
-
-function internalFlags(command: CommandDef): string[] {
-	return command.supportsNoPrompt ? ['--no-prompt'] : [];
-}
-
-function requiresRunConfirmation(command: CommandDef): boolean {
-	return command.supportsNoPrompt === true;
-}
-
-function successMessage(command: CommandDef, payload: SfJsonEnvelope | undefined): string {
-	if (payload?.message) {
-		return payload.message;
-	}
-
-	if (payload?.result && typeof payload.result === 'object') {
-		const summary = 'summary' in payload.result ? payload.result.summary : undefined;
-		if (typeof summary === 'string' && summary.length > 0) {
-			return summary;
-		}
-	}
-
-	return `${command.title} completed.`;
-}
-
-async function reportSuccess(deps: RunnerDeps, command: CommandDef, inputArgs: readonly string[], result: SfCommandResult): Promise<void> {
-	if (inputArgs.includes('--dry-run')) {
-		deps.showInformationMessage(result.message ?? `${command.title} completed.`);
+	if (!preview.files.length) {
+		deps.showInformationMessage(preview.manualSteps?.length
+			? `${command.title}: no files to write. Follow the manual steps in the Apx output channel.`
+			: `${command.title}: no files to write.`);
 		return;
 	}
-
-	const outputDir = outputDirectory(command, inputArgs, deps.workspaceFolder);
-	if (!outputDir) {
-		deps.showInformationMessage(result.message ?? `${command.title} completed.`);
+	const existing = preview.files.filter((file) => file.status === 'exists');
+	const detail = overwriteDetail(preview, deps.dirtyDocuments?.() ?? []);
+	const choice = existing.length
+		? await deps.showWarningMessage(`${existing.length} of the files ${command.title} would write already exist.`, { modal: true, detail }, 'Overwrite all', 'Skip existing')
+		: await deps.showInformationMessage(`Write the files ${command.title} planned?`, { modal: true, detail }, 'Apply');
+	if (choice !== 'Apply' && choice !== 'Overwrite all' && choice !== 'Skip existing') {
+		deps.showInformationMessage('No files written.');
 		return;
 	}
-
-	const choice = await deps.showInformationMessage(result.message ?? `${command.title} completed.`, 'Open Folder');
-	if (choice === 'Open Folder') {
-		await (deps.executeCommand ?? vscode.commands.executeCommand)('revealInExplorer', vscode.Uri.file(outputDir));
+	const overwrite = choice === 'Skip existing' ? 'skip' : 'overwrite';
+	// Apply the exact preview the user approved; never re-plan.
+	const outcome = await execute(`Applying ${command.title}`, (connection, ctx) => useCase.apply(connection, preview, { ...ctx, overwrite }));
+	appendLines(deps.output, core.renderGenerationResult(outcome, { commandId: command.coreId }));
+	const reveal = await deps.showInformationMessage(`${command.title} completed.`, 'Reveal in Explorer');
+	if (reveal === 'Reveal in Explorer') {
+		await (deps.executeCommand ?? vscode.commands.executeCommand)('revealInExplorer', vscode.Uri.file(preview.baseDir));
 	}
 }
 
-function inputsFromArgs(command: CommandDef, args: readonly string[]): string[] {
-	const prefixLength = command.cliId.split(' ').length;
-	return args.slice(prefixLength);
-}
-
-function outputDirectory(command: CommandDef, inputArgs: readonly string[], workspaceFolder?: string): string | undefined {
-	const outputFlag = command.flags.find((flag) => flag.kind === 'outputDir');
-	if (!outputFlag) {
-		return undefined;
+async function runRead(deps: RunnerDeps, core: ApxCore, command: CommandDef, useCase: ReadCase, options: Record<string, unknown>, inputs: GatheredInputs, projectRoot: string, execute: Execute): Promise<void> {
+	const result = await execute(`Running ${command.title}`, (connection, ctx) => useCase.run(connection, options as never, ctx)) as DeadUseCaseResult;
+	const username = inputs.org ? await deps.orgs.resolveUsername(inputs.org).catch(() => inputs.org) : undefined;
+	const reportOptions = { includeSuppressed: options.includeSuppressed === true, deadOnly: options.deadOnly === true, username };
+	const report = core.renderDeadCodeReport(result, reportOptions);
+	deps.output.appendLine('');
+	deps.output.appendLine(report);
+	deps.output.show(true);
+	if (!options.destructiveManifest || !result.manifest) {
+		deps.showInformationMessage(`${command.title} completed.`);
+		return;
 	}
-
-	const outputPath = flagValue(inputArgs, outputFlag.name) ?? outputFlag.default;
-	if (!outputPath) {
-		return undefined;
+	const outputBase = await core.resolveOutputBase(String(options.outputPath), projectRoot);
+	const choice = await deps.showWarningMessage(`Write destructive manifest to ${path.join(outputBase, 'dead-code')}?`, { modal: true, detail: 'The deploy command to run next is printed in the Apx output channel. Nothing is deployed from VS Code.' }, 'Write');
+	if (choice !== 'Write') {
+		deps.showInformationMessage('Destructive manifest not written.');
+		return;
 	}
-
-	return path.isAbsolute(outputPath) || !workspaceFolder ? outputPath : path.join(workspaceFolder, outputPath);
+	const written = await core.writeDeadCodeManifest(result, outputBase);
+	const manifestDir = written.manifestDir ?? path.join(outputBase, 'dead-code');
+	// Only print what the report adds once a manifest exists (written path + deploy command).
+	appendLines(deps.output, newTrailingLines(report, core.renderDeadCodeReport({ ...result, ...written }, { ...reportOptions, manifestDir })));
+	deps.showInformationMessage(`Destructive manifest written to ${manifestDir}.`);
 }
 
-function flagValue(args: readonly string[], flagName: string): string | undefined {
-	const index = args.indexOf(`--${flagName}`);
-	return index >= 0 ? args[index + 1] : undefined;
+function reportError(deps: RunnerDeps, core: ApxCore, command: CommandDef, error: unknown): void {
+	if (core.isApxError(error) && error.code === 'cancelled' || error instanceof Error && error.name === 'AbortError') {
+		deps.output.appendLine(`${command.title} cancelled.`);
+		(deps.setStatusBarMessage ?? vscode.window.setStatusBarMessage)(`$(circle-slash) ${command.title} cancelled`, 5000);
+		return;
+	}
+	const { title, detail } = core.describeError(error);
+	const hint = isAuthError(error) ? 'Re-authenticate with `sf org login web`, then try again.' : undefined;
+	const fullDetail = [detail, hint].filter(Boolean).join('\n\n') || undefined;
+	deps.output.appendLine(`Error: ${title}${fullDetail ? `\n${fullDetail}` : ''}`);
+	if (!core.isApxError(error) && error instanceof Error && error.stack) { deps.output.appendLine(error.stack); }
+	deps.output.show(true);
+	deps.showErrorMessage(title, { detail: fullDetail });
 }
 
-export const defaultSpawnProcess: SpawnProcess = (_file, args, options) => spawnSf(args, options);
+function isAuthError(error: unknown): boolean {
+	const value = error as { code?: string; name?: string; errorCode?: string };
+	return value?.code === 'INVALID_SESSION_ID' || value?.errorCode === 'INVALID_SESSION_ID' || value?.name === 'RefreshTokenAuthError' || value?.name === 'INVALID_SESSION_ID';
+}

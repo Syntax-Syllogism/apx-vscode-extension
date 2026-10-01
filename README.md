@@ -1,45 +1,39 @@
 # Apx
 
-Apx is a VS Code extension for guided `@syntax-syllogism/apx` Salesforce CLI workflows: generating Apex Enterprise Pattern (AEP) artifacts (selectors, domains, services, unit-of-work, and AT4DX injection/binding metadata) without leaving the editor.
+Apx is a VS Code extension for guided Apex Enterprise Pattern (AEP) work without leaving the editor: generating selectors, domains, services, unit-of-work, and AT4DX injection/binding metadata, and finding dead Apex classes in an org. It runs [`@syntax-syllogism/apx-core`](https://github.com/Syntax-Syllogism/apx-core) in process, the same library behind the `sf apx` CLI plugin.
 
 ## Features
 
 - Command Palette entries and Apx sidebar actions for every supported command.
 - AEP Generation commands:
-  - `SF Apx: Generate (Multiple)` (`sf apx generate`)
-  - `SF Apx: Generate Selector` (`sf apx generate selector`)
-  - `SF Apx: Generate Domain` (`sf apx generate domain`)
-  - `SF Apx: Generate Service` (`sf apx generate service`)
-  - `SF Apx: Generate Unit of Work` (`sf apx generate unitofwork`)
-  - `SF Apx: Selector Method` (`sf apx generate selector method`)
-  - `SF Apx: Selector Field Injection` (`sf apx generate selector field-injection`)
-  - `SF Apx: Generate Action` (`sf apx generate action`)
-  - `SF Apx: Generate Criteria` (`sf apx generate criteria`)
-- Dedicated Apx activity-bar view, with AEP commands grouped into Pattern Layers, Selector Injection (AT4DX), and Domain Processes (AT4DX).
-- Guided native inputs:
-  - Salesforce org picker with `apx.defaultTargetOrg` fallback.
-  - Quick Pick-first folder picker for `--output-path`.
-  - QuickPick enums for flags such as `--trigger-operation`.
-  - Single-select QuickPick for the mutually exclusive AEP flavor choice (`--at4dx` or `--fflib`).
-  - Multi-select QuickPick for boolean options, including `--dry-run` and the aggregate artifact toggles.
-  - InputBox prompts for string values such as SObject names, class names, prefixes, and ordering tokens.
-- Aggregate generation (`apx generate`) validates that at least one artifact group is selected: selector, domain, or unit of work.
-- Org-less helper commands (`generate action`, `generate criteria`, `generate selector method`, `generate selector field-injection`) run without prompting for an org; `generate service` lets the org prompt be skipped.
-- Background `sf apx ...` execution through `child_process.spawn`, streamed to the `Apx` Output Channel.
-- Cancellable progress notifications while commands run.
-- Human-readable CLI output by default; the extension does not force `--json`.
-- Optional dry-run support for generation commands, with an Open Folder action after successful file generation.
-- Pre-run detection for the Salesforce CLI and the apx plugin, with an install action when the plugin is missing.
+  - `SF Apx: Generate (Multiple)`
+  - `SF Apx: Generate Selector`
+  - `SF Apx: Generate Domain`
+  - `SF Apx: Generate Service`
+  - `SF Apx: Generate Unit of Work`
+  - `SF Apx: Selector Method`
+  - `SF Apx: Selector Field Injection`
+  - `SF Apx: Generate Action`
+  - `SF Apx: Generate Criteria`
+- Analyze commands:
+  - `SF Apx: Find Dead Code` — classifies Apex classes as dead, test-only, test-of-dead, or retained, and can write a destructive-changes manifest after confirmation. Nothing is deployed from VS Code.
+- Dedicated Apx activity-bar view, with AEP commands grouped into Pattern Layers, Selector Injection (AT4DX), and Domain Processes (AT4DX), plus an Analyze group.
+- Guided native inputs, derived from each apx-core command's options schema:
+  - Salesforce org picker (orgs authorized with the Salesforce CLI or any `@salesforce/core` tool) with `apx.defaultTargetOrg` fallback.
+  - Quick Pick-first folder picker for the output folder.
+  - Quick Pick for enums such as the framework flavor and trigger operation.
+  - Multi-select Quick Pick for boolean options.
+  - Input boxes for strings and comma-separated lists.
+  - Invalid answers are reported and the field is asked again.
+- Generation previews: the planned files are listed in the `Apx` output channel (`NEW` or `OVERWRITE`) and a modal asks before anything is written — **Apply**, or **Overwrite all** / **Skip existing** when files already exist. Open editors with unsaved changes to files that would be overwritten are listed in the modal.
+- Org-less commands (`Generate Action`, `Generate Criteria`, `Selector Method`, `Selector Field Injection`) never prompt for an org; `Generate Service` offers "(none)".
+- Cancellable progress notifications. Long operations stop after the current step.
 
 ## Requirements
 
-Install the Salesforce CLI and the apx plugin before running commands:
-
-```sh
-sf plugins install @syntax-syllogism/apx
-```
-
-The extension checks for `sf` and `sf apx --help` before the first command run. If the plugin is missing, it offers an install action.
+- VS Code 1.125 or later.
+- A folder containing `sfdx-project.json` open in the workspace.
+- For org-backed commands, an org authorized on this machine (for example with `sf org login web`). The Salesforce CLI itself is not required to run the extension.
 
 ## Extension Settings
 
@@ -66,10 +60,10 @@ See [docs/README.md](docs/README.md) for comprehensive developer documentation, 
 
 ### Updating Commands
 
-Refresh the committed command registry from an apx oclif manifest:
+Commands come from `@syntax-syllogism/apx-core`'s `commandDescriptors`. When apx-core adds a use case, bump the pinned version in `package.json`, add an entry to `src/registry/commandTable.ts`, and run:
 
 ```sh
-npm run gen:commands -- vendor/apx.oclif.manifest.json src/registry/commands.generated.ts
+npm run sync:contributes
 ```
 
-This is needed when the apx plugin adds new commands or changes flag definitions. `vendor/apx.oclif.manifest.json` is a manually vendored, point-in-time copy of the `apx` CLI's `oclif.manifest.json` (generated by that repo's build) — refresh it by copying the file over whenever the CLI changes.
+This rewrites `contributes.commands` in `package.json`. See [docs/extending.md](docs/extending.md).

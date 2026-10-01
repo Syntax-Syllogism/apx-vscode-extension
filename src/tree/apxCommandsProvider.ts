@@ -21,13 +21,21 @@ interface CommandNode {
 }
 
 export class ApxCommandsProvider implements vscode.TreeDataProvider<ApxNode> {
-	public constructor(private readonly commands: readonly CommandDef[]) {}
+	private readonly changed = new vscode.EventEmitter<ApxNode | undefined>();
+	public readonly onDidChangeTreeData = this.changed.event;
+
+	public constructor(private commands: readonly CommandDef[]) {}
+
+	public refresh(commands: readonly CommandDef[]): void {
+		this.commands = commands;
+		this.changed.fire(undefined);
+	}
 
 	public getTreeItem(element: ApxNode): vscode.TreeItem {
 		if (element.type === 'group') {
 			const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.Expanded);
 			item.contextValue = 'apxGroup';
-			item.iconPath = new vscode.ThemeIcon(element.label === 'AEP Generation' ? 'file-code' : 'person');
+			item.iconPath = new vscode.ThemeIcon(groupIcon(element.label));
 			return item;
 		}
 
@@ -88,9 +96,9 @@ function orderedSubgroups(commands: readonly CommandDef[]): SubgroupNode[] {
 		.map(([label, subgroupCommands]) => ({ type: 'subgroup', label, commands: subgroupCommands }));
 }
 
-// Bucket order follows the registry order (driven by the allow-list in
-// scripts/gen-commands.ts), which is the single source of truth for how groups,
-// subgroups, and commands are sequenced. A Map preserves first-insertion order.
+// Bucket order follows the registry order (apx-core's commandDescriptors order),
+// which is the single source of truth for how groups, subgroups, and commands
+// are sequenced. A Map preserves first-insertion order.
 function orderedBuckets<T>(items: readonly T[], keyOf: (item: T) => string): [string, T[]][] {
 	const buckets = new Map<string, T[]>();
 	for (const item of items) {
@@ -108,5 +116,9 @@ function commandIcon(command: CommandDef): string {
 		return 'warning';
 	}
 
-	return command.group === 'AEP Generation' ? 'file-code' : 'person';
+	return groupIcon(command.group);
+}
+
+function groupIcon(group: string): string {
+	return group === 'AEP Generation' ? 'file-code' : 'search';
 }

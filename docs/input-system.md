@@ -1,54 +1,71 @@
 # Input System
 
-How the extension collects flag values from the user before running an Apx CLI command.
+How the extension collects option values from the user before running an apx-core use case.
 
 ## Overview
 
-`src/input/gatherInputs.ts` is the entry point. `gatherInputs(command, store, inputApi)` iterates over a command's flag definitions and calls `gatherFlag(...)` for each one. The return value is `GatheredInputs` — an `args` array ready to pass to the CLI and a `displayArgs` array for the Output Channel.
+`src/input/gatherInputs.ts` is the entry point. `gatherInputs(command, store, inputApi, projectRoot)` walks the command's `inputs` (built from the descriptor's options schema and `uiHints`, see [command-registry.md](command-registry.md)) and returns `GatheredInputs`:
 
-`InputApi` is the seam between business logic and VS Code UI. Tests stub it directly; `createVsCodeInputApi()` wires the real pickers for production.
+```typescript
+interface GatheredInputs {
+  org?: string;                        // alias or username; undefined when none
+  options: Record<string, unknown>;    // passed to the use case after safeParse
+  display: string[];                   // "Label: value" lines for the output channel
+}
+```
 
-## Flag kinds and their pickers
+`InputApi` is the seam between input logic and VS Code UI. Tests stub it directly; `createVsCodeInputApi(orgs)` wires the real pickers.
 
-| `flag.kind` | Picker called | Source file |
+## Input kinds and their pickers
+
+| `input.kind` | Picker called | Source file |
 |---|---|---|
-| `org` | `inputApi.pickOrg(lastValue)` | `src/input/orgPicker.ts` |
-| `outputDir` | `inputApi.pickOutputDirectory(options)` | `src/input/outputDirPicker.ts` |
-| `enum` | `inputApi.showQuickPick(options)` | inline in `gatherFlag` |
-| `string` / `apiVersion` | `inputApi.showInputBox(options)` | inline in `gatherFlag` |
-| `boolean` | collected separately via `inputApi.showBooleanPick(...)` | inline in `gatherInputs` |
-| `file` | none — see below | n/a |
+| `org` | `inputApi.pickOrg(lastValue, optional)` | `src/input/orgPicker.ts` |
+| `folder` | `inputApi.pickOutputDirectory(options)` | `src/input/outputDirPicker.ts` |
+| `file` | `inputApi.pickFile(label, projectRoot)` | `src/input/filePicker.ts` |
+| `enum` | `inputApi.showQuickPick(items)` (last or default value first) | inline in `gatherOne` |
+| `string` | `inputApi.showInputBox(options)` | inline in `gatherOne` |
+| `multiString` | `inputApi.showInputBox(options)`, split on commas into an array | inline in `gatherOne` |
+| `boolean` | collected together via `inputApi.showBooleanPick(...)` | `gatherBooleans` |
 
-`file` remains a valid `FlagKind` value (shared with the sibling `warden-code-ext` extension, whose `--users-def`/`--personas-def`/`--snapshot` flags use it), but no apx command currently has a `file`-kind flag, and this repo has no definition-file picker — it only served user-lifecycle commands, which live in `warden-code-ext` now. If a future apx command needs a workspace-file picker, either add an equivalent picker or fall through to `pickFile`/`pickFolder` in `src/input/filePicker.ts`.
+### Org
 
-Exclusive groups are gathered by `gatherExclusiveGroup(...)` when the first group member is reached in the loop, using `inputApi.showQuickPick`. apx currently has one such group: `flavor` (`--at4dx` / `--fflib`). A flag carrying `dependsOnFlag` would be skipped in the main loop and gathered as a follow-up right after its target flag is selected inside the group — no apx flag uses this today, but the mechanism (shared with `warden-code-ext`, which defers `--external-id` until `--users-def` is chosen) is kept for parity.
+The org input is added by the registry only when the descriptor's `requiresOrg` is `required` or `optional`. The picker lists orgs from `OrgService.listOrgs()` (expired orgs are marked), with the last-used org or the `apx.defaultTargetOrg` setting first. For optional orgs (for example Generate Service) a "(none)" item returns `NO_ORG`, and the command runs without a connection.
 
-## Output directory picker (`outputDir`)
+### Booleans
 
-`pickOutputDirectory` in `src/input/outputDirPicker.ts` presents a Quick Pick before falling back to the native OS folder dialog. Candidates are built in this order:
+All top-level booleans are shown in one multi-select Quick Pick, pre-selected from the last value or the schema default. Every boolean is set explicitly to `true` or `false`. Inputs with `dependsOn` (for example Dead Code's `deadOnly`, which depends on `destructiveManifest`) are asked only after the option they depend on is enabled.
 
-1. **Default** — the flag's `default` value (usually `generated-files`), labelled `Default`.
-2. **Last used** — the memento-stored value from the previous run, labelled `Last used`, shown only when it differs from the default.
-3. **Package directories** — paths from `sfdx-project.json` `packageDirectories`, with the `default: true` entry first, labelled `Package directory`. Missing or malformed JSON is silently skipped.
-4. **Workspace child folders** — direct subdirectories of the workspace root that are not noise dirs (`.git`, `.sf`, `.sfdx`, `node_modules`, `dist`, `out`, `coverage`, `.vscode`), labelled `Workspace folder`.
-5. **Choose Different Folder...** — opens the native OS folder picker via `pickFolder(...)` from `src/input/filePicker.ts`, which enforces workspace-relative output and rejects out-of-workspace selections with a warning.
+### Exclusive groups
 
-Candidates are deduplicated through `showWorkspaceQuickPick(...)` in `src/input/workspaceQuickPick.ts`; the first label/description wins. On Windows, deduplication is case-insensitive.
+Inputs that share an `exclusiveGroup` hint are offered as one Quick Pick ("Choose <group>"), and only the chosen member is gathered.
 
-The picker returns a **workspace-relative path string** in all cases (or `undefined` on cancel). Candidate directories do not need to exist — the CLI flag allows non-existent output paths.
+## Validation
 
-`pickFolder(...)` in `src/input/filePicker.ts` remains the native folder-dialog helper used only by the output-directory custom fallback. `pickFile(...)` remains available for future specialized file prompts, but is unused by the current apx command set.
+After gathering, the options are checked with `command.optionsSchema.safeParse`. On failure the first issue is shown as `<Label>: <message>` and that field is asked again, up to five attempts. If the issue does not map to a promptable input, gathering stops with the warning. The runner runs `safeParse` again before calling the use case.
 
-## Adding a new flag kind
+Cancelling a required prompt stops gathering (`undefined`). Cancelling or leaving an optional prompt empty leaves the option unset so the schema default applies.
 
-1. Add the kind string to `FlagKind` in `src/registry/types.ts`.
-2. Add a new method to `InputApi` in `src/input/gatherInputs.ts` if the picker logic warrants a testable seam; otherwise call a VS Code API directly in `gatherFlag`.
-3. Wire the real implementation in `createVsCodeInputApi()`.
-4. Add the dispatch branch in `gatherFlag(...)`.
-5. Add the new kind to the `knownKinds` set in `src/test/extension.test.ts` and write targeted tests.
+## Output directory picker (`folder`)
+
+`pickOutputDirectory` in `src/input/outputDirPicker.ts` presents a Quick Pick before falling back to the native folder dialog. Candidates, relative to the project root:
+
+1. **Default** — the schema default (usually `generated-files`), labelled `Default`.
+2. **Last used** — the stored value from the previous run, when it differs from the default.
+3. **Package directories** — from `sfdx-project.json` `packageDirectories`, the `default: true` entry first. Missing or malformed JSON is skipped.
+4. **Workspace child folders** — direct subdirectories that are not noise dirs (`.git`, `.sf`, `.sfdx`, `node_modules`, `dist`, `out`, `coverage`, `.vscode`).
+5. **Choose Different Folder...** — `pickFolder(...)` in `src/input/filePicker.ts`, which rejects folders outside the project with a warning.
+
+Candidates are deduplicated through `showWorkspaceQuickPick(...)`. The picker returns a relative path string (or `undefined` on cancel); the directory does not need to exist.
+
+## Adding a new input kind
+
+1. Add the kind to apx-core's `uiHints`.
+2. Add it to `InputKind` in `src/registry/types.ts`.
+3. Add a method to `InputApi` if the picker deserves a testable seam, and wire it in `createVsCodeInputApi()`.
+4. Add the branch in `gatherOne(...)`.
+5. Add the kind to the `knownKinds` set in `src/test/extension.test.ts` and write targeted tests.
 
 ## Last-value persistence
 
-`LastValueStore` (`src/util/memento.ts`) wraps a VS Code `Memento` and keys values by `(commandId, flagName)`, under an `apx:` prefix. `gatherFlag` reads it before prompting and writes it after a successful pick.
-
-For `outputDir` flags, the stored value is the selected workspace-relative directory path.
+`LastValueStore` (`src/util/memento.ts`) wraps the workspace `Memento` and keys values as `apx.last.<descriptorId>.<optionKey>`. `gatherOne` reads the value before prompting and writes it after a successful pick; booleans are stored as `'true'` / `'false'`.

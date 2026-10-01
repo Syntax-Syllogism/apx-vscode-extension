@@ -1,152 +1,66 @@
 # Command Runner
 
-The Command Runner is responsible for executing Apx CLI commands, managing their lifecycle, and communicating results to the user.
+The Command Runner calls apx-core use cases in process, manages progress and cancellation, and reports results to the user.
 
 ## Overview
 
-`src/runner/commandRunner.ts` exports `createCommandRunner(deps)` which returns a `CommandRunner` interface with a single method:
+`src/runner/commandRunner.ts` exports `createCommandRunner(deps)`, which returns a `CommandRunner` with a single method:
 
 ```typescript
-run(command: CommandDef, inputs: GatheredInputs): Promise<void>
+run(command: CommandDef, inputs: GatheredInputs, projectRoot: string): Promise<void>
 ```
 
-## Execution Flow
+`run` re-validates `inputs.options` with the use case's `optionsSchema.safeParse`, connects to `inputs.org` through `OrgService` when one was chosen, and dispatches on the use case's `kind`.
 
-apx has no destructive commands, so `strategyFor()` always returns the single `StandardCommandStrategy` — there is no `DestructiveCommandStrategy` in this repo (that dry-run → confirm → apply flow lives only in the sibling `warden-code-ext` extension, for `warden strip`).
+## Generation (write use cases)
 
-1. **Build arguments** — Combine command ID, user inputs, and internal flags via `buildCliArgs()`
-2. **Display command** — Show the full `sf apx ...` command in the Output Channel
-3. **Spawn process** — Use `spawnSf(args)` to start the CLI as a child process
-4. **Stream output** — Pipe stdout/stderr to the Output Channel in real-time
-5. **Wait for exit** — Track the process exit code and handle completion
+1. **Plan** — `useCase.plan(conn, options, ctx)` returns a `GenerationPreview` (`baseDir`, `files` marked `new` or `exists`, optional `manualSteps`). Nothing is written yet.
+2. **Preview** — `renderGenerationPlan(preview)` is written to the `Apx` output channel (`NEW  path` / `OVERWRITE  path`, plus manual steps).
+3. **Nothing to write** — when `files` is empty (for example fflib unit-of-work, which is manual steps only), an information message points to the output channel and no modal is shown.
+4. **Confirm** — a modal:
+   - no existing files: **Apply** / Cancel;
+   - some files exist: **Overwrite all** / **Skip existing** / Cancel.
 
-## Confirmation Dialogs
+   The modal detail is `N new, M existing files in <baseDir>`, followed by any existing files that are open in an editor with unsaved changes (`overwriteDetail` in `render.ts`).
+5. **Apply** — `useCase.apply(conn, preview, { ...ctx, overwrite })` with the same preview object the user approved (`overwrite` is `'skip'` for Skip existing, otherwise `'overwrite'`). The runner never re-plans.
+6. **Result** — `renderGenerationResult(outcome, { commandId })` is written to the output channel, and a message offers **Reveal in Explorer** for `preview.baseDir`.
 
-`requiresRunConfirmation()` only prompts before running when a command sets `supportsNoPrompt: true`. No apx command does today, so no apx command shows a pre-run confirmation dialog — the infrastructure exists (shared with the sibling extensions) but is currently dormant here:
+Cancel at the modal writes nothing and shows "No files written."
 
-```
-[Run sf apx ...]
-[Don't run]  [Run]
-```
+## Dead Code (read use case)
 
-## Progress Management
+1. **Run** — `useCases.dead.run(conn, options, ctx)` reports phases (inventory, bindings, dependencies, classify, manifest) through the progress notification.
+2. **Report** — `renderDeadCodeReport(result, { includeSuppressed, deadOnly, username })` is written to the output channel.
+3. **Manifest** — when `destructiveManifest` was selected and the result has a manifest, a modal asks "Write destructive manifest to `<outputBase>/dead-code`?" (`outputBase` from `resolveOutputBase(outputPath, projectRoot)`). Only **Write** calls `writeDeadCodeManifest(result, outputBase)`. The lines the report adds once a manifest exists (the written path and the `sf project deploy start` command to run next) are appended to the output channel. Nothing is deployed from VS Code.
 
-While a command runs, the extension shows a progress notification:
+## Progress and Cancellation
 
-```
-Running sf apx <command>...
-[Cancel button]
-```
+Each `plan`, `apply` and `run` call is wrapped in a cancellable `withProgress` notification. Progress events are shown as `message (done/total)`; no increments are reported, because phase totals are not known up front.
 
-If the user clicks Cancel, the child process is killed. The cancellation is detected via `cancelled` flag in the `RunResult`.
+Cancel aborts an `AbortController` whose signal is passed to the use case. Use cases check the signal between phases and queries, so the notification changes to "Cancelling after current step…". A cancelled run (`ApxError` with code `cancelled`, or an `AbortError`) is logged to the output channel and shown as a status-bar message, not as an error.
 
-## Output Channel
+## Errors
 
-All command activity is logged to the "Apx" Output Channel:
-
-```
-$ sf apx generate selector --target-org my-org --sobject Account --at4dx
-[detailed command output with colors]
-```
-
-The Output Channel is automatically shown if:
-
-- A command starts (via `output.show(true)`)
-- An error occurs
-
-## Internal Flags
-
-Some flags are added automatically and not prompted for:
-
-- `--no-prompt` — Would be added for commands that support it (`supportsNoPrompt: true`); no apx command sets this today, so `internalFlags()` is currently a no-op for every apx command
-- `--json` — Never added; the extension reads human-readable output by default
-- `--flags-dir` — Not supported by the extension
-
-The `internalFlags(command)` function handles this logic.
-
-## Process Spawning
-
-### `spawnSf(args)`
-
-Spawns `sf <args>` as a child process:
-
-```typescript
-const child = spawnSf(['apx', 'generate', 'selector', '--target-org=my-org', '--sobject=Account']);
-child.stdout.on('data', (data) => { /* handle output */ });
-child.stderr.on('data', (data) => { /* handle output */ });
-child.on('exit', (code) => { /* handle exit */ });
-```
-
-**Environment**: The process inherits the parent's environment. The working directory defaults to the workspace folder if available.
-
-### Error Handling
-
-- **Plugin not found** — Caught by `SfDetector` pre-flight check before `CommandRunner` is called
-- **Process spawn failure** — Rejected promise; user sees an error message
-- **Process exit with non-zero code** — Treated as failure; Output Channel is shown
+- **Expired session** — when a call fails with `INVALID_SESSION_ID` or `RefreshTokenAuthError` and an org was chosen, the runner calls `orgs.invalidate(org)`, reconnects, and retries once.
+- **Everything else** — `describeError(error)` provides the title and detail, shown in an error message and the output channel. Auth errors add the hint "Re-authenticate with `sf org login web`, then try again." Stacks are logged for non-`ApxError` failures.
 
 ## Dependencies (`RunnerDeps`)
 
-The Command Runner is dependency-injected to enable testing:
-
 ```typescript
 interface RunnerDeps {
-  output: vscode.OutputChannel;              // Where to log
-  spawnProcess: SpawnProcess;                // Process spawner (for testing)
+  core: () => Promise<ApxCore>;              // loadApxCore in production, a stub in tests
+  orgs: OrgService;
+  output: vscode.OutputChannel;
   withProgress: typeof vscode.window.withProgress;
   showInformationMessage: typeof vscode.window.showInformationMessage;
   showWarningMessage: typeof vscode.window.showWarningMessage;
   showErrorMessage: typeof vscode.window.showErrorMessage;
+  setStatusBarMessage?: (text: string, hideAfterTimeout: number) => unknown;
   executeCommand?: typeof vscode.commands.executeCommand;
-  workspaceFolder?: string;
+  dirtyDocuments?: () => readonly string[];  // absolute paths of unsaved open editors
 }
-```
-
-In production, `createCommandRunner()` is called with real VS Code APIs. In tests, these are stubbed.
-
-## Result Tracking
-
-Internal `RunResult` interface tracks command completion:
-
-```typescript
-interface RunResult {
-  code: number | null;      // Exit code (null = terminated)
-  stdout: string;           // Combined stdout
-  stderr: string;           // Combined stderr
-  cancelled: boolean;       // User clicked Cancel
-}
-```
-
-Success is determined from the parsed Salesforce CLI JSON envelope's `status` field when present, falling back to the process exit code.
-
-## Example: Running a Command
-
-```typescript
-const command = {
-  id: 'apx.generate.selector',
-  cliId: 'apx generate selector',
-  title: 'SF Apx: Generate Selector',
-  flags: [/* ... */],
-};
-
-const inputs = {
-  args: ['--target-org', 'my-org', '--sobject', 'Account', '--at4dx'],
-  displayArgs: ['--target-org', 'my-org', '--sobject', 'Account', '--at4dx'],
-};
-
-await runner.run(command, inputs);
-// → Spawns: sf apx generate selector --target-org my-org --sobject Account --at4dx
-// → Streams output to Output Channel
-// → Shows success/error notification, with an "Open Folder" action when the command
-//   wrote to an outputDir-kind flag (e.g. --output-path)
 ```
 
 ## Testing
 
-Tests for the Command Runner are in `src/test/extension.test.ts`. Key test patterns:
-
-- Stub `spawnProcess` to return a mock child process
-- Mock VS Code message dialogs to avoid interactive prompts
-- Verify that the correct arguments are built
-- Verify cancellation is handled correctly
-- Verify ANSI stripping and JSON-envelope parsing (success/failure/malformed)
+Runner tests in `src/test/extension.test.ts` spread the real apx-core module and replace `useCases[id].plan/apply/run`, the renderers and `writeDeadCodeManifest` with stubs. `OrgService` and the VS Code message functions are fakes that record their calls. See [testing.md](testing.md).

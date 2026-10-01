@@ -14,12 +14,12 @@ export async function pickFile(label: string, defaultDirectory?: string): Promis
 	return result?.[0]?.fsPath;
 }
 
-export async function pickFolder(label: string, defaultDirectory?: string): Promise<string | undefined> {
+export async function pickFolder(label: string, defaultDirectory?: string, root?: string): Promise<string | undefined> {
 	const result = await vscode.window.showOpenDialog({
 		canSelectFiles: false,
 		canSelectFolders: true,
 		canSelectMany: false,
-		defaultUri: defaultDirectoryUri(defaultDirectory),
+		defaultUri: defaultDirectoryUri(defaultDirectory, root),
 		openLabel: label,
 	});
 	const selected = result?.[0]?.fsPath;
@@ -27,7 +27,7 @@ export async function pickFolder(label: string, defaultDirectory?: string): Prom
 		return undefined;
 	}
 
-	const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	const workspaceRoot = root ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 	if (!workspaceRoot) {
 		return selected;
 	}
@@ -48,8 +48,8 @@ export function directoryOf(filePath: string): string {
 	return path.dirname(filePath);
 }
 
-function defaultDirectoryUri(defaultDirectory?: string): vscode.Uri | undefined {
-	const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+function defaultDirectoryUri(defaultDirectory?: string, root?: string): vscode.Uri | undefined {
+	const workspaceRoot = root ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 	if (!defaultDirectory) {
 		return workspaceRoot ? vscode.Uri.file(workspaceRoot) : undefined;
 	}

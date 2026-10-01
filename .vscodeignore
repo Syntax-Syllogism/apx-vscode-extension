@@ -10,7 +10,6 @@ out/**
 node_modules/**
 src/**
 scripts/**
-vendor/**
 
 # repo-management / release tooling — must NEVER ship in the .vsix
 .github/**

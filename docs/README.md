@@ -7,7 +7,7 @@ This directory contains documentation for developers working on the Apx VS Code 
 New to the codebase? Start here:
 
 1. **[Architecture Overview](architecture.md)** — High-level design and component overview
-2. **[Extending the Extension](extending.md)** — How to add new commands, flag kinds, and features
+2. **[Extending the Extension](extending.md)** — How to add new commands, input kinds, and features
 3. **[Development Setup](#development-setup)** — Get your environment ready
 
 ## Core Documentation
@@ -19,22 +19,18 @@ New to the codebase? Start here:
 
 ### Developer Reference
 
-- **[Command Registry](command-registry.md)** — Command definitions, flag kinds, and auto-generation from oclif manifest
+- **[Command Registry](command-registry.md)** — How commands and inputs are built from apx-core descriptors
 - **[Testing Guide](testing.md)** — How to write and run tests
-- **[Extending the Extension](extending.md)** — Detailed guide to adding new commands, flags, and customizations
+- **[Extending the Extension](extending.md)** — Detailed guide to adding new commands, inputs, and customizations
 
 ## Development Setup
 
 ### Prerequisites
 
-- Node.js 18+
-- npm 8+
-- VS Code 1.88+
-- Salesforce CLI and apx plugin installed locally:
-
-  ```bash
-  sf plugins install @syntax-syllogism/apx
-  ```
+- Node.js 22+
+- npm 10+
+- VS Code 1.125+
+- An authorized Salesforce org (for org-backed commands); the Salesforce CLI is only needed to log in (`sf org login web`)
 
 ### Initial Setup
 
@@ -67,7 +63,7 @@ npm run package            # Build for distribution
 npm run package:vsix       # Create .vsix file for VS Code Marketplace
 
 # Maintenance
-npm run gen:commands       # Regenerate command registry from apx manifest
+npm run sync:contributes   # Rewrite package.json contributes.commands from apx-core descriptors
 ```
 
 ### Debugging
@@ -90,24 +86,27 @@ apx-code-ext/
       filePicker.ts            # Native file/folder picker helpers
       workspaceQuickPick.ts    # Shared workspace-relative Quick Pick helper
       outputDirPicker.ts       # Directory selection picker
+    core/                      # In-process apx-core and @salesforce/core
+      load.ts                  # Lazy, memoized dynamic imports
+      orgService.ts            # Org listing, connections, auth invalidation
     registry/                  # Command definitions
       types.ts                 # TypeScript interfaces
-      commands.generated.ts    # Auto-generated command list
+      commandTable.ts          # Descriptor id → VS Code command id/title/subgroup
+      commands.ts              # buildCommands(core): descriptors + uiHints → CommandDef[]
     runner/                    # Command execution
-      commandRunner.ts         # Main execution logic
-      sfProcess.ts            # Salesforce CLI spawning
-      sfDetect.ts             # Dependency detection
-      ansi.ts                 # ANSI color stripping
+      commandRunner.ts         # Plan/preview/apply and read flows, progress, errors
+      render.ts                # Output-channel glue around apx-core renderers
     tree/                      # Sidebar UI
       apxCommandsProvider.ts  # Tree view implementation
     util/
       memento.ts              # Last-value persistence
     test/
-      extension.test.ts       # Unit tests
-      sfProcess.test.ts       # Process tests
+      extension.test.ts       # Registry, input and runner tests (core stubbed)
+      pickers.test.ts         # Picker and tree view tests
+      helpers.ts              # VS Code API stubs and in-memory fakes
   
   scripts/
-    gen-commands.ts           # Registry generation script
+    sync-contributes.mjs      # Rewrites package.json contributes.commands
   
   docs/                        # This documentation
     README.md                 # Documentation index
@@ -117,9 +116,6 @@ apx-code-ext/
     input-system.md           # Input gathering
     extending.md              # Extension guide
     testing.md                # Testing guide
-  
-  vendor/
-    apx.oclif.manifest.json  # apx CLI command manifest
   
   .github/
     workflows/
@@ -134,64 +130,55 @@ apx-code-ext/
 
 ### Commands
 
-A **Command** is a wrapper around an apx CLI command. Each command has:
+A **Command** wraps one apx-core use case. Each command has:
 
 - **id** — VS Code command ID (e.g., `apx.generate.selector`)
-- **cliId** — CLI command string (e.g., `apx generate selector`)
+- **coreId** — apx-core descriptor id (e.g., `generate-selector`)
+- **cliId** — the matching CLI command, shown as the tree tooltip
 - **title** — Display name in Command Palette
-- **flags** — Prompts to collect from the user
-- **group** — Sidebar category (always `AEP Generation` in this extension)
-- **subgroup** — Sidebar nesting within the group (Pattern Layers, Selector Injection (AT4DX), Domain Processes (AT4DX))
+- **inputs** — Prompts to collect, derived from the descriptor's zod options schema and `uiHints`
+- **group** — Sidebar category (`AEP Generation` or `Analyze`)
+- **subgroup** — Sidebar nesting within AEP Generation (Pattern Layers, Selector Injection (AT4DX), Domain Processes (AT4DX))
 
-### Flag Kinds
+### Input Kinds
 
-Flags can be of different **kinds**, which determine how they're presented to the user:
-
-- **org** — Salesforce org picker
-- **outputDir** - Quick Pick-first directory picker
+- **org** — Salesforce org picker (added when the descriptor's `requiresOrg` is `required` or `optional`)
+- **folder** — Quick Pick-first directory picker
+- **file** — Native file picker
 - **string** — Text input box
-- **enum** — Dropdown picker
+- **multiString** — Comma-separated text input, split into an array
+- **enum** — Quick Pick
 - **boolean** — Multi-select checkbox picker
-- **apiVersion** — API version input
-- **file** — Reserved in `FlagKind` for parity with the shared runner code, but no apx command currently uses it (no apx flag is a workspace JSON definition file)
 
 ### Workflows
 
-apx has no destructive commands, so every command follows the same simple flow:
-
-User invokes command → Prompted for inputs → CLI runs → Output displayed
+- **Generation (write use cases):** inputs → `plan` → file list in the output channel → Apply / Overwrite all / Skip existing / Cancel modal → `apply` with the same preview.
+- **Dead Code (read use case):** inputs → `run` with phase progress → report in the output channel → optional destructive-manifest write after confirmation.
 
 ## Common Tasks
 
 ### Add a new command
 
-1. Add to apx CLI plugin
-2. Update `allowList` in `scripts/gen-commands.ts`
-3. Run `npm run gen:commands`
-4. Test with `npm test`
+1. Add the use case and descriptor in apx-core and release it
+2. Bump the `@syntax-syllogism/apx-core` pin in `package.json`
+3. Add an entry to `src/registry/commandTable.ts`
+4. Run `npm run sync:contributes`
+5. Test with `npm test`
 
 See [Extending the Extension](extending.md#adding-support-for-a-new-command).
 
-### Add a new flag kind
+### Add a new input kind
 
-1. Add to `FlagKind` type in `src/registry/types.ts`
-2. Add UI handling in `src/input/gatherInputs.ts`
-3. Add tests
-4. Update `scripts/gen-commands.ts` if inferencing needed
+1. Add the kind to apx-core's `uiHints` (prompt metadata lives there)
+2. Add it to `InputKind` in `src/registry/types.ts`
+3. Add UI handling in `gatherOne()` in `src/input/gatherInputs.ts`
+4. Add tests
 
-See [Extending the Extension](extending.md#adding-support-for-a-new-flag-kind).
+See [Extending the Extension](extending.md#adding-support-for-a-new-input-kind).
 
-### Customize flag prompts
+### Customize prompts
 
-Edit the maps in `scripts/gen-commands.ts`:
-
-- `placeholderByCommandFlag` — Example text
-- `summaryByCommandFlag` — Description
-- `flagOrder()` — Prompt order
-- `dependsOnFlagFor()` — Defer a flag until another is selected
-- `guiHiddenFlagsByCommand` — Hide certain flags
-
-Run `npm run gen:commands` after changes.
+Labels, summaries, placeholders, exclusive groups and `dependsOn` come from apx-core's `uiHints`, and prompt order follows the options schema. Change them in apx-core, not here.
 
 ### Run a command manually
 
@@ -203,18 +190,9 @@ Run `npm run gen:commands` after changes.
 
 ### Debug a test failure
 
-```bash
-npm run watch-tests
-# Edit src/test/extension.test.ts
-# Add it.only('...', ...)
-# Watch mode re-runs the test
-```
+Change the failing `test(...)` to `test.only(...)` in `src/test/*.test.ts` and run `npm test` (`xvfb-run -a npm test` on headless Linux).
 
-Or debug in VS Code:
-
-1. Set a breakpoint
-2. Run → Start Debugging
-3. Select "Mocha Tests" configuration
+Or debug from VS Code's Testing view with the Extension Test Runner (set a breakpoint, then **Debug Test**). See [testing.md](testing.md#debugging-tests).
 
 ## Release Process
 
@@ -227,12 +205,12 @@ Or debug in VS Code:
 
 ## Troubleshooting
 
-### Tests fail after updating apx plugin
+### Tests fail after bumping apx-core
 
-Regenerate the command registry:
+Resync the contributed commands (and add any new descriptor to `commandTable.ts`):
 
 ```bash
-npm run gen:commands
+npm run sync:contributes
 npm test
 ```
 
@@ -245,9 +223,9 @@ npm test
 
 ### Command hangs or times out
 
-1. Check apx CLI works: `sf apx --help`
-2. Run command manually to see if it hangs there
-3. Check for unintended interactive prompts
+1. Check the progress notification: Dead Code reports each phase, and cancel stops after the current step
+2. Check the `Apx` output channel for errors
+3. If an org call fails with an expired session, re-authenticate with `sf org login web`
 
 ## Contributing
 
@@ -258,7 +236,6 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for contribution guidelines.
 - [Apx CLI Plugin](https://github.com/Syntax-Syllogism/apx)
 - [VS Code Extension API](https://code.visualstudio.com/api)
 - [Salesforce CLI Documentation](https://developer.salesforce.com/docs/atlas.en-us.sfdx_cli_reference.meta/sfdx_cli_reference/)
-- [Oclif Documentation](https://oclif.io/)
 
 ## Questions?
 
@@ -266,4 +243,4 @@ Open an issue on [GitHub](https://github.com/Syntax-Syllogism/apx-code-ext/issue
 
 ---
 
-**Last updated:** 2026-07-12
+**Last updated:** 2026-09-30

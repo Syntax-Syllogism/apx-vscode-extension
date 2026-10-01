@@ -3,16 +3,15 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { pickFolder } from './filePicker';
 import { showWorkspaceQuickPick, type WorkspaceQuickPickItem } from './workspaceQuickPick';
-import type { CommandDef, FlagDef } from '../registry/types';
 
 export type OutputDirectoryChoice = WorkspaceQuickPickItem;
 
 export interface PickOutputDirectoryOptions {
-	command: CommandDef;
-	flag: FlagDef;
 	label: string;
 	defaultValue?: string;
 	lastValue?: string;
+	/** Folder containing sfdx-project.json; defaults to the first workspace folder. */
+	workspaceRoot?: string;
 }
 
 const NOISE_DIRS = new Set(['.git', '.sf', '.sfdx', 'node_modules', 'dist', 'out', 'coverage', '.vscode']);
@@ -20,7 +19,7 @@ const CUSTOM_FOLDER_VALUE = '__apx_choose_different_folder__';
 
 export async function pickOutputDirectory(options: PickOutputDirectoryOptions): Promise<string | undefined> {
 	const { label, defaultValue, lastValue } = options;
-	const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	const workspaceRoot = options.workspaceRoot ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
 	const items: OutputDirectoryChoice[] = [];
 
@@ -67,7 +66,7 @@ export async function pickOutputDirectory(options: PickOutputDirectoryOptions): 
 	}
 
 	if (pickedValue === CUSTOM_FOLDER_VALUE) {
-		return pickFolder(label, defaultValue);
+		return pickFolder(label, defaultValue, workspaceRoot);
 	}
 
 	return pickedValue;

@@ -1,43 +1,21 @@
 import * as vscode from 'vscode';
-import { execSf } from '../runner/sfProcess';
+import type { OrgChoice, OrgService } from '../core/orgService';
 
-interface SfOrg {
-	alias?: string;
-	username?: string;
-	isDefaultUsername?: boolean;
-}
+/** Returned by {@link pickOrg} when the user explicitly chooses to run without an org. */
+export const NO_ORG = '';
 
-interface SfOrgList {
-	result?: {
-		nonScratchOrgs?: SfOrg[];
-		scratchOrgs?: SfOrg[];
-	};
-}
-
-export interface OrgChoice extends vscode.QuickPickItem {
+interface OrgPickItem extends vscode.QuickPickItem {
 	value: string;
 }
 
-export async function loadOrgChoices(): Promise<OrgChoice[]> {
-	const payload = await execSf(['org', 'list', '--json']);
-	const orgList = JSON.parse(payload) as SfOrgList;
-	const orgs = [
-		...(orgList.result?.nonScratchOrgs ?? []),
-		...(orgList.result?.scratchOrgs ?? []),
-	].filter((org): org is SfOrg & { username: string } => Boolean(org.username));
-
-	return orgs.map((org) => ({
-		label: org.alias ? `${org.alias} (${org.username})` : org.username,
-		description: org.isDefaultUsername ? 'default' : undefined,
-		value: org.alias ?? org.username,
-	}));
-}
-
-export async function pickOrg(lastValue?: string): Promise<string | undefined> {
-	const choices = await loadOrgChoices();
-	const picked = await vscode.window.showQuickPick(prioritizeOrgChoices(choices, lastValue), {
+export async function pickOrg(orgs: OrgService, lastValue: string | undefined, optional: boolean): Promise<string | undefined> {
+	const choices: OrgPickItem[] = prioritizeOrgChoices(await orgs.listOrgs(), lastValue);
+	if (optional) {
+		choices.push({ label: '(none)', description: 'Run without a Salesforce org', value: NO_ORG });
+	}
+	const picked = await vscode.window.showQuickPick(choices, {
 		ignoreFocusOut: true,
-		placeHolder: 'Select a Salesforce org',
+		placeHolder: optional ? 'Select a Salesforce org (optional)' : 'Select a Salesforce org',
 		matchOnDescription: true,
 	});
 

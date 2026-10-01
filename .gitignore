@@ -55,3 +55,7 @@ docs/smoke-reports/
 .gitignore.public
 bin/publish.sh
 bin/changelog-prompt.txt
+
+# === private-only: aloop ===
+.loop/
+*loop.config.mjs

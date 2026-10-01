@@ -1,30 +1,35 @@
-export type FlagKind = 'org' | 'file' | 'outputDir' | 'string' | 'boolean' | 'apiVersion' | 'enum';
+import type { z } from 'zod';
 
-export interface FlagDef {
-	name: string;
-	kind: FlagKind;
+/** An apx-core descriptor id, e.g. `generate-selector` or `dead`. */
+export type CommandId = string;
+
+export type InputKind = 'org' | 'file' | 'folder' | 'multiString' | 'string' | 'boolean' | 'enum';
+
+export type OrgRequirement = 'required' | 'optional' | 'none';
+
+export interface InputDef {
+	key: string;
+	kind: InputKind;
+	label: string;
 	summary?: string;
 	required?: boolean;
 	options?: readonly string[];
 	placeholder?: string;
 	exclusiveGroup?: string;
-	/**
-	 * Only prompt for this flag once the named flag has been chosen. Used to defer
-	 * follow-up flags (e.g. `external-id`) until the exclusive-group option they
-	 * apply to (e.g. `users-def`) is selected.
-	 */
-	dependsOnFlag?: string;
-	default?: string;
+	dependsOn?: string;
+	default?: unknown;
 }
 
 export interface CommandDef {
 	id: string;
+	coreId: CommandId;
 	cliId: string;
 	title: string;
 	group: string;
 	subgroup?: string;
-	supportsNoPrompt?: boolean;
-	destructive?: boolean;
-	requireOneOf?: readonly string[];
-	flags: readonly FlagDef[];
+	kind: 'read' | 'write';
+	destructive: boolean;
+	requiresOrg: OrgRequirement;
+	optionsSchema: z.ZodType;
+	inputs: readonly InputDef[];
 }
