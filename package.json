@@ -2,18 +2,18 @@
   "name": "apx-ext",
   "displayName": "Apx",
   "description": "Guided Apex generation and dead-code analysis powered by apx-core.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "syntax-syllogism",
   "author": "Jake Richter <j.p.richter@gmail.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Syntax-Syllogism/apx-code-ext.git"
+    "url": "git+https://github.com/Syntax-Syllogism/apx-vscode-extension.git"
   },
   "bugs": {
-    "url": "https://github.com/Syntax-Syllogism/apx-code-ext/issues"
+    "url": "https://github.com/Syntax-Syllogism/apx-vscode-extension/issues"
   },
-  "homepage": "https://github.com/Syntax-Syllogism/apx-code-ext#readme",
+  "homepage": "https://github.com/Syntax-Syllogism/apx-vscode-extension#readme",
   "icon": "media/apx-logo.png",
   "keywords": [
     "salesforce",
@@ -130,7 +130,7 @@
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "26.x",
-    "@types/vscode": "1.140.0",
+    "@types/vscode": "1.125.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^3.9.2",

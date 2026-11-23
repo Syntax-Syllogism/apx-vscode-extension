@@ -4,6 +4,12 @@ All notable changes to the "apx-ext" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.2.2] - 2026-11-23
+
+### Fixed
+
+- Package repository links now point to the apx-vscode-extension repository
+
 ## [0.2.0] - 2026-10-01
 
 ### Changed
@@ -37,4 +43,4 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ### Added
 
-- Initial release — extracted from jawn-code-ext v0.1.6. Ships the AEP Generation half of jawn-code-ext's command set as a standalone extension targeting the `@syntax-syllogism/apx` Salesforce CLI plugin: `SF Apx: Generate (Multiple)`, `Generate Selector`, `Generate Domain`, `Generate Service`, `Generate Unit of Work`, `Selector Method`, `Selector Field Injection`, `Generate Action`, and `Generate Criteria`.
+- Initial release — extracted from jawn-vscode-extension v0.1.6. Ships the AEP Generation half of jawn-vscode-extension's command set as a standalone extension targeting the `@syntax-syllogism/apx` Salesforce CLI plugin: `SF Apx: Generate (Multiple)`, `Generate Selector`, `Generate Domain`, `Generate Service`, `Generate Unit of Work`, `Selector Method`, `Selector Field Injection`, `Generate Action`, and `Generate Criteria`.

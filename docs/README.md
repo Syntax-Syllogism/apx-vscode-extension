@@ -36,8 +36,8 @@ New to the codebase? Start here:
 
 ```bash
 # Clone the repository
-git clone https://github.com/Syntax-Syllogism/apx-code-ext.git
-cd apx-code-ext
+git clone https://github.com/Syntax-Syllogism/apx-vscode-extension.git
+cd apx-vscode-extension
 
 # Install dependencies
 npm install
@@ -77,7 +77,7 @@ npm run sync:contributes   # Rewrite package.json contributes.commands from apx-
 ## Project Structure
 
 ```
-apx-code-ext/
+apx-vscode-extension/
   src/
     extension.ts                # Extension entry point
     input/                      # Input gathering (pickers, etc.)
@@ -239,7 +239,7 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for contribution guidelines.
 
 ## Questions?
 
-Open an issue on [GitHub](https://github.com/Syntax-Syllogism/apx-code-ext/issues).
+Open an issue on [GitHub](https://github.com/Syntax-Syllogism/apx-vscode-extension/issues).
 
 ---
 
